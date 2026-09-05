@@ -1,6 +1,6 @@
 # Watermark Studio 🎨
 
-Aplicación de escritorio profesional desarrollada en Python para añadir marcas de agua totalmente personalizables a imágenes (con arquitectura preparada para vídeo en la siguiente fase).
+Aplicación de escritorio profesional desarrollada en Python para añadir marcas de agua totalmente personalizables a imágenes y videos.
 
 ---
 
