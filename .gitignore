@@ -1,0 +1,7 @@
+__pycache__/
+build/
+dist/
+dist_bin/
+*.pyc
+.syncmetadata
+WatermarkStudio.spec
