@@ -1,423 +1,385 @@
-import io
+"""
+src/gui/preview_canvas.py
+WatermarkStudio — Lienzo Gráfico Interactivo de Previsualización (Dark Slate / Obsidian)
+Soporte completo para arrastre libre de marca de agua, barra flotante de zoom y timeline de vídeo.
+"""
+
 from PyQt6.QtWidgets import (
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsItem, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QFrame,
-    QSlider, QLabel
+    QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
+    QPushButton, QSlider, QGraphicsView, QGraphicsScene,
+    QGraphicsPixmapItem, QGraphicsItem, QSizePolicy
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF, QPoint, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QWheelEvent, QMouseEvent, QCursor
+from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF, QTimer
+from PyQt6.QtGui import (
+    QColor, QPainter, QPixmap, QImage, QCursor, QPen, QBrush
+)
 from PIL import Image
-from typing import Optional, Dict, Any
-from ..core.watermark_engine import WatermarkEngine
+
 
 class DraggableWatermarkItem(QGraphicsPixmapItem):
     """
-    Elemento gráfico de la marca de agua que permite arrastre con el ratón
-    directamente sobre el lienzo interactivo.
+    Elemento gráfico de marca de agua arrastrable libremente con caja
+    delimitadora interactiva, guías sutiles y emisión de posición en tiempo real.
     """
-    def __init__(self, parent_canvas):
-        super().__init__()
-        self.canvas = parent_canvas
+    def __init__(self, parent_canvas, parent=None):
+        super().__init__(parent)
+        self.parent_canvas = parent_canvas
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
-            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges |
-            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
         )
-        self.setAcceptHoverEvents(True)
-        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
+        self.setZValue(10)  # Siempre por encima de la imagen o vídeo base
+        self._is_selected = True
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            super().mousePressEvent(event)
-            self.canvas.on_watermark_drag_start()
-        else:
-            event.ignore()
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            if self.parent_canvas:
+                pos = self.pos()
+                self.parent_canvas.on_watermark_moved(pos.x(), pos.y())
+        return super().itemChange(change, value)
 
-    def mouseMoveEvent(self, event):
-        if event.buttons() & Qt.MouseButton.LeftButton:
-            super().mouseMoveEvent(event)
-            self.canvas.on_watermark_dragged(self.pos())
-        else:
-            event.ignore()
+    def paint(self, painter: QPainter, option, widget=None):
+        super().paint(painter, option, widget)
+        # Dibujar caja delimitadora y líneas guía sutiles en cyan eléctrico
+        if self.isSelected() or self._is_selected:
+            painter.save()
+            rect = self.boundingRect()
+            pen = QPen(QColor("#38bdf8"), 1.5, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
 
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            super().mouseReleaseEvent(event)
-            self.canvas.on_watermark_drag_end(self.pos())
-        else:
-            event.ignore()
+            # Tiradores de esquina sutiles
+            handle_size = 6
+            painter.setBrush(QBrush(QColor("#38bdf8")))
+            painter.setPen(QPen(QColor("#0f1016"), 1))
+            corners = [
+                rect.topLeft(), rect.topRight(),
+                rect.bottomLeft(), rect.bottomRight()
+            ]
+            for pt in corners:
+                painter.drawRect(QRectF(pt.x() - handle_size/2, pt.y() - handle_size/2, handle_size, handle_size))
+            painter.restore()
+
+
+class FloatingZoomBar(QFrame):
+    """Barra flotante translúcida superior izquierda para control rápido de escala y visualización."""
+    def __init__(self, parent_canvas):
+        super().__init__(parent_canvas)
+        self.parent_canvas = parent_canvas
+        self.setObjectName("floating_zoom_bar")
+        self.setStyleSheet("""
+            QFrame#floating_zoom_bar {
+                background-color: rgba(24, 24, 36, 0.88);
+                border: 1px solid #28283a;
+                border-radius: 6px;
+            }
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #e2e8f0;
+                font-weight: 600;
+                font-size: 11px;
+                padding: 4px 8px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #242436;
+                color: #60a5fa;
+            }
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(2)
+
+        self.btn_fit = QPushButton("⛶ Ajustar")
+        self.btn_fit.setToolTip("Ajustar imagen al lienzo (Ctrl+0)")
+        self.btn_fit.clicked.connect(self.parent_canvas.fit_in_view)
+
+        self.btn_1x = QPushButton("1:1")
+        self.btn_1x.setToolTip("Escala original 100%")
+        self.btn_1x.clicked.connect(self.parent_canvas.reset_zoom)
+
+        self.lbl_zoom = QLabel("100%")
+        self.lbl_zoom.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600; padding: 0 4px;")
+
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setToolTip("Aumentar zoom")
+        self.btn_zoom_in.clicked.connect(self.parent_canvas.zoom_in)
+
+        self.btn_zoom_out = QPushButton("−")
+        self.btn_zoom_out.setToolTip("Reducir zoom")
+        self.btn_zoom_out.clicked.connect(self.parent_canvas.zoom_out)
+
+        layout.addWidget(self.btn_fit)
+        layout.addWidget(self.btn_1x)
+        layout.addWidget(self.btn_zoom_out)
+        layout.addWidget(self.lbl_zoom)
+        layout.addWidget(self.btn_zoom_in)
+
+    def update_zoom_text(self, factor_percent: int):
+        self.lbl_zoom.setText(f"{factor_percent}%")
 
 
 class PreviewCanvas(QWidget):
     """
-    Contenedor principal del lienzo visual que incluye:
-    - Lienzo gráfico interactivo con arrastre de marca de agua y pan.
-    - Barra flotante de zoom (Ajustar, 1:1, +, -).
-    - Barra de reproducción / scrubber de vídeo (aparece solo cuando hay un vídeo cargado).
+    Lienzo interactivo central basado en QGraphicsView.
+    Admite zoom con rueda de ratón, paneo fluido, arrastre de marca de agua
+    y controles de reproducción para medios de vídeo.
     """
     position_changed = pyqtSignal(float, float)
-    time_seeked = pyqtSignal(float) # segundo actual seleccionado
+    time_seeked = pyqtSignal(float)
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.init_ui()
+        self._current_zoom = 1.0
+        self._media_duration = 0.0
+        self._is_video = False
+        self._is_playing = False
 
-        self.bg_item: Optional[QGraphicsPixmapItem] = None
-        self.watermark_item: Optional[DraggableWatermarkItem] = None
+        # Timer para simulación fluida de reproducción de vídeo
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(100)  # 10 fps de preview interactivo
+        self._play_timer.timeout.connect(self._on_play_tick)
 
-        self.pil_base_image: Optional[Image.Image] = None
-        self.pil_watermark_element: Optional[Image.Image] = None
-        self.current_config: Dict[str, Any] = {}
+        self._build_ui()
 
-        self.is_video_mode = False
-        self.video_duration = 0.0
-        self.current_video_time = 0.0
-        self.is_playing = False
-
-        # Timer para reproducción continua del vídeo
-        self.play_timer = QTimer(self)
-        self.play_timer.setInterval(100) # 10 fps en preview para fluidez ligera
-        self.play_timer.timeout.connect(self.advance_playback)
-
-        self.is_panning = False
-        self.pan_start_pos = QPoint()
-        self.is_custom_pos = False
-
-    def init_ui(self):
+    def _build_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(4)
+        main_layout.setSpacing(0)
 
-        # 1. Vista gráfica principal
+        # -------------------------------------------------------------
+        # 1. ESCENA Y VISTA GRÁFICA
+        # -------------------------------------------------------------
         self.scene = QGraphicsScene(self)
         self.view = QGraphicsView(self.scene, self)
-        self.view.setRenderHints(
-            QPainter.RenderHint.Antialiasing |
-            QPainter.RenderHint.SmoothPixmapTransform
-        )
-        self.view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
-        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.view.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        
+        self.view.setObjectName("canvas_view")
         self.view.setStyleSheet("""
-            QGraphicsView {
+            QGraphicsView#canvas_view {
                 background-color: #14141c;
                 border: 1px solid #28283a;
                 border-radius: 6px;
             }
         """)
+        self.view.setRenderHints(
+            QPainter.RenderHint.Antialiasing |
+            QPainter.RenderHint.SmoothPixmapTransform
+        )
+        self.view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
 
-        # Eventos del view
-        self.view.wheelEvent = self.on_view_wheel
-        self.view.mousePressEvent = self.on_view_mouse_press
-        self.view.mouseMoveEvent = self.on_view_mouse_move
-        self.view.mouseReleaseEvent = self.on_view_mouse_release
-        self.view.resizeEvent = self.on_view_resize
+        # Eventos de ratón para Paneado y Zoom
+        self.view.wheelEvent = self._handle_wheel_zoom
+        self.view.mousePressEvent = self._handle_mouse_press
+        self.view.mouseMoveEvent = self._handle_mouse_move
+        self.view.mouseReleaseEvent = self._handle_mouse_release
+
+        # Capas de la escena
+        self.base_pixmap_item = QGraphicsPixmapItem()
+        self.base_pixmap_item.setZValue(0)
+        self.scene.addItem(self.base_pixmap_item)
+
+        self.watermark_item = DraggableWatermarkItem(self)
+        self.scene.addItem(self.watermark_item)
 
         main_layout.addWidget(self.view, 1)
 
-        # 2. Barra flotante de zoom
-        self.create_floating_toolbar()
+        # -------------------------------------------------------------
+        # 2. BARRA FLOTANTE DE ZOOM
+        # -------------------------------------------------------------
+        self.floating_zoom = FloatingZoomBar(self)
+        self.floating_zoom.move(14, 14)
+        self.floating_zoom.raise_()
 
-        # 3. Barra inferior de control de vídeo (inicialmente oculta)
-        self.create_video_timeline(main_layout)
-
-    def create_floating_toolbar(self):
-        self.toolbar_frame = QFrame(self.view)
-        self.toolbar_frame.setStyleSheet("""
-            QFrame {
-                background-color: rgba(26, 26, 38, 0.85);
-                border: 1px solid #3b3b52;
-                border-radius: 6px;
-                padding: 2px;
-            }
-            QPushButton {
-                background-color: #242436;
-                color: #f1f5f9;
-                border: 1px solid #3b3b50;
-                border-radius: 4px;
-                font-size: 11px;
-                font-weight: bold;
-                padding: 3px 8px;
-            }
-            QPushButton:hover {
-                background-color: #3b82f6;
-                color: white;
-            }
+        # -------------------------------------------------------------
+        # 3. BARRA INFERIOR DE VÍDEO (Timeline & Transporte)
+        # -------------------------------------------------------------
+        self.frame_video = QFrame()
+        self.frame_video.setFixedHeight(38)
+        self.frame_video.setStyleSheet("""
+            background-color: #181824;
+            border-top: 1px solid #28283a;
+            padding: 2px 10px;
         """)
-        tb_layout = QHBoxLayout(self.toolbar_frame)
-        tb_layout.setContentsMargins(4, 4, 4, 4)
-        tb_layout.setSpacing(4)
+        video_layout = QHBoxLayout(self.frame_video)
+        video_layout.setContentsMargins(6, 4, 6, 4)
+        video_layout.setSpacing(8)
 
-        btn_fit = QPushButton("⛶ Ajustar")
-        btn_fit.setToolTip("Ajustar imagen completa a la ventana")
-        btn_fit.clicked.connect(self.fit_in_view)
-        tb_layout.addWidget(btn_fit)
-
-        btn_orig = QPushButton("1:1")
-        btn_orig.setToolTip("Tamaño real 100%")
-        btn_orig.clicked.connect(self.reset_zoom)
-        tb_layout.addWidget(btn_orig)
-
-        btn_zin = QPushButton("➕")
-        btn_zin.setToolTip("Acercar Zoom")
-        btn_zin.clicked.connect(self.zoom_in)
-        tb_layout.addWidget(btn_zin)
-
-        btn_zout = QPushButton("➖")
-        btn_zout.setToolTip("Alejar Zoom")
-        btn_zout.clicked.connect(self.zoom_out)
-        tb_layout.addWidget(btn_zout)
-
-        self.toolbar_frame.adjustSize()
-        self.toolbar_frame.move(12, 12)
-
-    def create_video_timeline(self, parent_layout: QVBoxLayout):
-        """Crea la barra inferior interactiva para reproducción de vídeo."""
-        self.timeline_frame = QFrame(self)
-        self.timeline_frame.setFixedHeight(38)
-        self.timeline_frame.setStyleSheet("""
-            QFrame {
-                background-color: #181824;
-                border: 1px solid #28283a;
-                border-radius: 5px;
-            }
+        self.btn_play_pause = QPushButton("▶")
+        self.btn_play_pause.setFixedSize(36, 26)
+        self.btn_play_pause.setStyleSheet("""
             QPushButton {
                 background-color: #2563eb;
-                color: white;
-                font-weight: bold;
+                color: #ffffff;
+                border: none;
                 border-radius: 4px;
                 font-size: 11px;
-                padding: 2px 8px;
+                font-weight: 700;
             }
-            QPushButton:hover { background-color: #1d4ed8; }
+            QPushButton:hover {
+                background-color: #1d4ed8;
+            }
         """)
-        tl_layout = QHBoxLayout(self.timeline_frame)
-        tl_layout.setContentsMargins(6, 2, 6, 2)
-        tl_layout.setSpacing(8)
-
-        self.btn_play_pause = QPushButton("▶ Play")
-        self.btn_play_pause.setFixedWidth(60)
         self.btn_play_pause.clicked.connect(self.toggle_play_pause)
-        tl_layout.addWidget(self.btn_play_pause)
 
-        self.slider_timeline = QSlider(Qt.Orientation.Horizontal)
-        self.slider_timeline.setRange(0, 1000)
-        self.slider_timeline.setValue(0)
-        self.slider_timeline.sliderMoved.connect(self.on_slider_seek)
-        self.slider_timeline.sliderPressed.connect(self.on_slider_pressed)
-        tl_layout.addWidget(self.slider_timeline, 1)
+        self.slider_video = QSlider(Qt.Orientation.Horizontal)
+        self.slider_video.setRange(0, 1000)
+        self.slider_video.setValue(0)
+        self.slider_video.sliderMoved.connect(self._on_seek_moved)
 
-        self.lbl_time = QLabel("00:00 / 00:00")
-        self.lbl_time.setStyleSheet("color: #93c5fd; font-weight: bold; font-size: 11px;")
-        tl_layout.addWidget(self.lbl_time)
+        self.lbl_time = QLabel("00:00.00 / 00:00.00")
+        self.lbl_time.setStyleSheet("color: #93c5fd; font-family: 'Consolas', monospace; font-size: 11px; font-weight: 600;")
 
-        parent_layout.addWidget(self.timeline_frame)
-        self.timeline_frame.hide()
+        video_layout.addWidget(self.btn_play_pause)
+        video_layout.addWidget(self.slider_video, 1)
+        video_layout.addWidget(self.lbl_time)
 
-    def set_video_mode(self, is_video: bool, duration: float = 0.0):
-        """Activa o desactiva la barra de tiempo según sea vídeo o imagen."""
-        self.is_video_mode = is_video
-        self.video_duration = duration
-        self.current_video_time = 0.0
-        self.is_playing = False
-        self.play_timer.stop()
-        self.btn_play_pause.setText("▶ Play")
+        main_layout.addWidget(self.frame_video)
+        self.frame_video.hide()  # Oculto por defecto hasta cargar un vídeo
 
-        if is_video:
-            self.timeline_frame.show()
-            self.update_time_label()
-        else:
-            self.timeline_frame.hide()
+    # -----------------------------------------------------------------
+    # CONTROL DE ZOOM Y NAVEGACIÓN
+    # -----------------------------------------------------------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.floating_zoom.move(14, 14)
 
-    def update_time_label(self):
-        cur_min, cur_sec = divmod(int(self.current_video_time), 60)
-        tot_min, tot_sec = divmod(int(self.video_duration), 60)
-        self.lbl_time.setText(f"{cur_min:02d}:{cur_sec:02d} / {tot_min:02d}:{tot_sec:02d}")
-
-    def toggle_play_pause(self):
-        if not self.is_video_mode or self.video_duration <= 0:
-            return
-
-        self.is_playing = not self.is_playing
-        if self.is_playing:
-            self.btn_play_pause.setText("⏸ Pausa")
-            self.play_timer.start()
-        else:
-            self.btn_play_pause.setText("▶ Play")
-            self.play_timer.stop()
-
-    def advance_playback(self):
-        if not self.is_video_mode or self.video_duration <= 0:
-            return
-
-        self.current_video_time += 0.2
-        if self.current_video_time > self.video_duration:
-            self.current_video_time = 0.0
-
-        # Actualizar slider y solicitar nuevo fotograma
-        slider_val = int((self.current_video_time / self.video_duration) * 1000)
-        self.slider_timeline.blockSignals(True)
-        self.slider_timeline.setValue(slider_val)
-        self.slider_timeline.blockSignals(False)
-
-        self.update_time_label()
-        self.time_seeked.emit(self.current_video_time)
-
-    def on_slider_pressed(self):
-        if self.is_playing:
-            self.toggle_play_pause()
-
-    def on_slider_seek(self, value: int):
-        if self.video_duration > 0:
-            self.current_video_time = (value / 1000.0) * self.video_duration
-            self.update_time_label()
-            self.time_seeked.emit(self.current_video_time)
-
-    def set_base_image(self, pil_image: Image.Image, keep_viewport: bool = False):
-        """Carga o actualiza el fotograma/imagen base en el lienzo."""
-        self.pil_base_image = pil_image
-
-        qimg = self.pil_to_qimage(pil_image)
-        pixmap = QPixmap.fromImage(qimg)
-
-        if not self.bg_item:
-            self.scene.clear()
-            self.bg_item = QGraphicsPixmapItem(pixmap)
-            self.bg_item.setZValue(0)
-            self.scene.addItem(self.bg_item)
-            self.scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
-
-            self.watermark_item = DraggableWatermarkItem(self)
-            self.watermark_item.setZValue(10)
-            self.scene.addItem(self.watermark_item)
-
-            self.fit_in_view()
-        else:
-            self.bg_item.setPixmap(pixmap)
-            if not keep_viewport:
-                self.scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
-
-    def update_watermark(self, config: Dict[str, Any]):
-        """Actualiza la apariencia y posición de la marca de agua."""
-        if not self.pil_base_image or not self.watermark_item:
-            return
-
-        self.current_config = config
-        mode = config.get("mode", "text")
-        preset = config.get("preset", "bottom_right")
-
-        if mode == "text":
-            self.pil_watermark_element = WatermarkEngine.create_text_element(
-                text=config.get("text", "Marca de Agua"),
-                font_path=config.get("font_path", ""),
-                font_size=config.get("font_size", 40),
-                color_rgb=config.get("color", (255, 255, 255)),
-                opacity=config.get("opacity", 0.8),
-                rotation=config.get("rotation", 0.0),
-                has_shadow=config.get("shadow", False),
-                has_outline=config.get("outline", False),
-                is_bold=config.get("is_bold", False),
-                is_italic=config.get("is_italic", False),
-                is_underline=config.get("is_underline", False)
-            )
-        else:
-            self.pil_watermark_element = WatermarkEngine.create_logo_element(
-                logo_path=config.get("logo_path", ""),
-                scale_percent=config.get("scale", 20.0),
-                base_w=self.pil_base_image.width,
-                base_h=self.pil_base_image.height,
-                opacity=config.get("opacity", 0.8),
-                rotation=config.get("rotation", 0.0)
-            )
-
-        wm_qimg = self.pil_to_qimage(self.pil_watermark_element)
-        wm_pixmap = QPixmap.fromImage(wm_qimg)
-        self.watermark_item.setPixmap(wm_pixmap)
-
-        elem_w = self.pil_watermark_element.width
-        elem_h = self.pil_watermark_element.height
-        base_w = self.pil_base_image.width
-        base_h = self.pil_base_image.height
-
-        if preset != "custom":
-            margin_x = int(config.get("margin_x", 30))
-            margin_y = int(config.get("margin_y", 30))
-            x, y = WatermarkEngine.calculate_preset_position(
-                base_w, base_h, elem_w, elem_h, preset, margin_x, margin_y
-            )
-            self.watermark_item.setPos(x, y)
-        else:
-            pos_x = config.get("pos_x", 20)
-            pos_y = config.get("pos_y", 20)
-            self.watermark_item.setPos(pos_x, pos_y)
-
-    def on_watermark_drag_start(self):
-        self.is_custom_pos = True
-
-    def on_watermark_dragged(self, pos: QPointF):
-        if self.pil_base_image:
-            self.position_changed.emit(pos.x(), pos.y())
-
-    def on_watermark_drag_end(self, pos: QPointF):
-        if self.pil_base_image:
-            self.position_changed.emit(pos.x(), pos.y())
-
-    def fit_in_view(self):
-        if self.scene.items():
-            self.view.resetTransform()
-            self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
-
-    def reset_zoom(self):
-        self.view.resetTransform()
+    def _handle_wheel_zoom(self, event):
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self.view.scale(factor, factor)
+        self._current_zoom *= factor
+        self.floating_zoom.update_zoom_text(int(round(self._current_zoom * 100)))
 
     def zoom_in(self):
         self.view.scale(1.2, 1.2)
+        self._current_zoom *= 1.2
+        self.floating_zoom.update_zoom_text(int(round(self._current_zoom * 100)))
 
     def zoom_out(self):
         self.view.scale(1 / 1.2, 1 / 1.2)
+        self._current_zoom /= 1.2
+        self.floating_zoom.update_zoom_text(int(round(self._current_zoom * 100)))
 
-    def on_view_resize(self, event):
-        if hasattr(self, 'toolbar_frame'):
-            self.toolbar_frame.move(12, 12)
+    def reset_zoom(self):
+        self.view.resetTransform()
+        self._current_zoom = 1.0
+        self.floating_zoom.update_zoom_text(100)
 
-    def on_view_wheel(self, event: QWheelEvent):
-        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.view.scale(factor, factor)
+    def fit_in_view(self):
+        rect = self.scene.itemsBoundingRect()
+        if not rect.isEmpty():
+            self.view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+            # Calcular zoom efectivo
+            self._current_zoom = self.view.transform().m11()
+            self.floating_zoom.update_zoom_text(int(round(self._current_zoom * 100)))
 
-    def on_view_mouse_press(self, event: QMouseEvent):
+    # -----------------------------------------------------------------
+    # PANEO (CLIC DERECHO O RUEDA CENTRAL)
+    # -----------------------------------------------------------------
+    def _handle_mouse_press(self, event):
         if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
-            self.is_panning = True
-            self.pan_start_pos = event.pos()
+            self._pan_active = True
+            self._pan_start = event.pos()
             self.view.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
         else:
             QGraphicsView.mousePressEvent(self.view, event)
 
-    def on_view_mouse_move(self, event: QMouseEvent):
-        if self.is_panning:
-            delta = event.pos() - self.pan_start_pos
-            self.pan_start_pos = event.pos()
+    def _handle_mouse_move(self, event):
+        if getattr(self, "_pan_active", False):
+            delta = event.pos() - self._pan_start
+            self._pan_start = event.pos()
             self.view.horizontalScrollBar().setValue(self.view.horizontalScrollBar().value() - delta.x())
             self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().value() - delta.y())
             event.accept()
         else:
             QGraphicsView.mouseMoveEvent(self.view, event)
 
-    def on_view_mouse_release(self, event: QMouseEvent):
+    def _handle_mouse_release(self, event):
         if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
-            self.is_panning = False
+            self._pan_active = False
             self.view.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
         else:
             QGraphicsView.mouseReleaseEvent(self.view, event)
 
+    # -----------------------------------------------------------------
+    # MARCA DE AGUA: ACTUALIZACIÓN Y ARRASTRE
+    # -----------------------------------------------------------------
+    def on_watermark_moved(self, x: float, y: float):
+        """Notifica hacia MainWindow para sincronizar el panel lateral."""
+        self.position_changed.emit(x, y)
+
+    def set_base_image(self, pil_image: Image.Image, is_video: bool = False, duration: float = 0.0):
+        """Establece la imagen de fondo base desde un PIL.Image."""
+        self._is_video = is_video
+        self._media_duration = duration
+
+        qimg = self.pil_to_qimage(pil_image)
+        pixmap = QPixmap.fromImage(qimg)
+        self.base_pixmap_item.setPixmap(pixmap)
+        self.scene.setSceneRect(QRectF(pixmap.rect()))
+
+        if is_video:
+            self.frame_video.show()
+            self.update_video_time_display(0.0)
+        else:
+            self.frame_video.hide()
+            self._play_timer.stop()
+
+        self.fit_in_view()
+
+    def set_watermark_pixmap(self, pil_image: Image.Image, x: float = None, y: float = None):
+        """Actualiza el gráfico y opcionalmente la posición de la marca."""
+        qimg = self.pil_to_qimage(pil_image)
+        pixmap = QPixmap.fromImage(qimg)
+        self.watermark_item.setPixmap(pixmap)
+        if x is not None and y is not None:
+            self.watermark_item.setPos(QPointF(x, y))
+
     @staticmethod
-    def pil_to_qimage(pil_img: Image.Image) -> QImage:
-        if pil_img.mode != "RGBA":
-            pil_img = pil_img.convert("RGBA")
-        data = pil_img.tobytes("raw", "RGBA")
-        qimage = QImage(data, pil_img.width, pil_img.height, QImage.Format.Format_RGBA8888)
+    def pil_to_qimage(pil_image: Image.Image) -> QImage:
+        """Conversión segura de PIL.Image a QImage con formato RGBA8888."""
+        if pil_image.mode != "RGBA":
+            pil_image = pil_image.convert("RGBA")
+        data = pil_image.tobytes("raw", "RGBA")
+        qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format.Format_RGBA8888)
         return qimage.copy()
+
+    # -----------------------------------------------------------------
+    # CONTROL DE LÍNEA DE TIEMPO DE VÍDEO
+    # -----------------------------------------------------------------
+    def toggle_play_pause(self):
+        if self._is_playing:
+            self._play_timer.stop()
+            self.btn_play_pause.setText("▶")
+            self._is_playing = False
+        else:
+            self._play_timer.start()
+            self.btn_play_pause.setText("⏸")
+            self._is_playing = True
+
+    def _on_play_tick(self):
+        current_val = self.slider_video.value()
+        if current_val >= 1000:
+            self.slider_video.setValue(0)
+        else:
+            self.slider_video.setValue(current_val + 5)
+        self._on_seek_moved(self.slider_video.value())
+
+    def _on_seek_moved(self, value: int):
+        current_sec = (value / 1000.0) * self._media_duration
+        self.update_video_time_display(current_sec)
+        self.time_seeked.emit(current_sec)
+
+    def update_video_time_display(self, current_sec: float):
+        cur_min, cur_s = divmod(int(current_sec), 60)
+        cur_ms = int((current_sec - int(current_sec)) * 100)
+        dur_min, dur_s = divmod(int(self._media_duration), 60)
+        dur_ms = int((self._media_duration - int(self._media_duration)) * 100)
+        self.lbl_time.setText(f"{cur_min:02d}:{cur_s:02d}.{cur_ms:02d} / {dur_min:02d}:{dur_s:02d}.{dur_ms:02d}")

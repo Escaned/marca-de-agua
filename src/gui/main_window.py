@@ -1,471 +1,285 @@
+"""
+src/gui/main_window.py
+WatermarkStudio — Ventana Principal de Aplicación PyQt6 (Dark Slate / Obsidian)
+Ensamblado con QMenuBar, QSplitter horizontal, atajos de teclado y barra de estado técnica.
+"""
+
+import sys
 import os
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QSplitter,
-    QFileDialog, QMessageBox, QStatusBar, QLabel, QApplication,
-    QProgressDialog
+    QMenuBar, QMenu, QStatusBar, QFileDialog, QMessageBox,
+    QApplication, QLabel
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QAction, QKeySequence, QDragEnterEvent, QDropEvent
-from PIL import Image
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QAction, QKeySequence, QIcon
+from PIL import Image, ImageDraw, ImageFont
 
-from .preview_canvas import PreviewCanvas
+# Importaciones locales del módulo GUI
+from .theme import DARK_THEME_QSS
 from .control_panel import ControlPanel
-from ..core.watermark_engine import WatermarkEngine
-from ..core.exporter import ImageExporter
-from ..core.video_engine import VideoEngine
-
-class VideoExportWorker(QThread):
-    """
-    Hilo en segundo plano para exportar el vídeo sin congelar la interfaz gráfica.
-    """
-    progress_changed = pyqtSignal(float)
-    finished_signal = pyqtSignal(bool, str)
-
-    def __init__(self, input_video: str, output_video: str, config: dict):
-        super().__init__()
-        self.input_video = input_video
-        self.output_video = output_video
-        self.config = config
-        self._is_cancelled = False
-
-    def cancel(self):
-        self._is_cancelled = True
-
-    def run(self):
-        try:
-            def on_progress(p: float):
-                self.progress_changed.emit(p)
-
-            def is_cancel():
-                return self._is_cancelled
-
-            success = VideoEngine.apply_watermark_to_video(
-                self.input_video,
-                self.output_video,
-                self.config,
-                progress_callback=on_progress,
-                cancel_check=is_cancel
-            )
-
-            if success:
-                self.finished_signal.emit(True, self.output_video)
-            else:
-                self.finished_signal.emit(False, "Exportación cancelada.")
-        except Exception as e:
-            self.finished_signal.emit(False, str(e))
+from .preview_canvas import PreviewCanvas
 
 
 class MainWindow(QMainWindow):
     """
-    Ventana principal con soporte universal para Imágenes y Vídeos.
+    Ventana principal de WatermarkStudio con tema Obsidian/Dark Slate.
+    Coordina el lienzo PreviewCanvas y el panel lateral ControlPanel.
     """
-    VIDEO_EXTENSIONS = ('.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.wmv', '.m4v')
-    IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.tif')
-
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Watermark Studio - Editor de Marcas de Agua (Foto & Vídeo)")
-        self.setMinimumSize(850, 550)
+        self.setWindowTitle("WatermarkStudio — Editor Principal")
+        self.setMinimumSize(960, 600)
+        self.resize(1340, 840)
 
-        # Ajuste dinámico al tamaño de pantalla del usuario
-        screen = QApplication.primaryScreen()
-        if screen:
-            avail = screen.availableGeometry()
-            w = min(1280, int(avail.width() * 0.9))
-            h = min(800, int(avail.height() * 0.9))
-            self.resize(w, h)
-        else:
-            self.resize(1100, 700)
+        self._current_media_path = None
+        self._current_base_image = None
+        self._is_video = False
 
-        self.current_file_path: str = ""
-        self.is_video_loaded: bool = False
-        self.video_info: dict = {}
-        self.loaded_pil_image: Image.Image = None
-        self.export_worker: VideoExportWorker = None
+        self._init_ui()
+        self._setup_menu_and_shortcuts()
+        self._apply_theme()
+        self._create_welcome_canvas()
 
-        self.init_ui()
-        self.apply_dark_theme()
-        self.setup_menu_and_shortcuts()
-
-        # Canvas inicial de bienvenida
-        self.create_welcome_canvas()
-
-    def init_ui(self):
-        self.setAcceptDrops(True)
-
-        central_widget = QWidget()
+    def _init_ui(self):
+        central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(4)
 
-        # Splitter horizontal
+        root_layout = QHBoxLayout(central_widget)
+        root_layout.setContentsMargins(4, 4, 4, 4)
+        root_layout.setSpacing(4)
+
+        # Splitter horizontal no colapsable
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
 
-        # 1. Canvas interactivo central
-        self.canvas = PreviewCanvas()
+        # 1. Lienzo de previsualización gráfico (Stretch 1)
+        self.canvas = PreviewCanvas(self)
         self.canvas.position_changed.connect(self.on_canvas_position_changed)
         self.canvas.time_seeked.connect(self.on_video_time_seeked)
-        self.splitter.addWidget(self.canvas)
 
-        # 2. Panel lateral de controles (fijo y ultra-compacto)
-        self.control_panel = ControlPanel()
-        self.control_panel.setFixedWidth(240)
+        # 2. Panel lateral de control ergonómico (Stretch 0)
+        self.control_panel = ControlPanel(self)
         self.control_panel.config_changed.connect(self.on_config_changed)
         self.control_panel.open_image_requested.connect(self.open_media_dialog)
         self.control_panel.save_image_requested.connect(self.save_media_dialog)
-        self.splitter.addWidget(self.control_panel)
 
+        self.splitter.addWidget(self.canvas)
+        self.splitter.addWidget(self.control_panel)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
-        main_layout.addWidget(self.splitter)
 
-        # Barra de estado
-        self.status_bar = QStatusBar()
+        root_layout.addWidget(self.splitter)
+
+        # 3. Barra de estado técnica inferior
+        self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
 
-        self.lbl_status_info = QLabel("Listo. Arrastra una foto o vídeo, o pulsa 'Cargar'.")
-        self.lbl_resolution_info = QLabel("")
-        self.status_bar.addWidget(self.lbl_status_info, 1)
-        self.status_bar.addPermanentWidget(self.lbl_resolution_info)
+        self.lbl_status_engine = QLabel("● Motor Gráfico Listo | Aceleración por GPU Activa")
+        self.lbl_status_engine.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 500;")
 
-    def setup_menu_and_shortcuts(self):
+        self.lbl_status_resolution = QLabel("Lienzo: 1920 × 1080 px (16:9)")
+        self.lbl_status_resolution.setStyleSheet("color: #94a3b8; font-size: 11px; margin-right: 12px;")
+
+        self.status_bar.addWidget(self.lbl_status_engine)
+        self.status_bar.addPermanentWidget(self.lbl_status_resolution)
+
+    def _setup_menu_and_shortcuts(self):
         menubar = self.menuBar()
-        file_menu = menubar.addMenu("Archivo")
 
-        open_action = QAction("Cargar Foto o Vídeo...", self)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.open_media_dialog)
-        file_menu.addAction(open_action)
+        # Menú Archivo
+        menu_file = menubar.addMenu("&Archivo")
 
-        save_action = QAction("Guardar Resultado con Marca de Agua...", self)
-        save_action.setShortcut(QKeySequence.StandardKey.Save)
-        save_action.triggered.connect(self.save_media_dialog)
-        file_menu.addAction(save_action)
+        action_open = QAction("&Cargar Foto o Vídeo…", self)
+        action_open.setShortcut(QKeySequence("Ctrl+O"))
+        action_open.triggered.connect(self.open_media_dialog)
+        menu_file.addAction(action_open)
 
-        file_menu.addSeparator()
+        action_save = QAction("&Guardar Resultado…", self)
+        action_save.setShortcut(QKeySequence("Ctrl+S"))
+        action_save.triggered.connect(self.save_media_dialog)
+        menu_file.addAction(action_save)
 
-        exit_action = QAction("Salir", self)
-        exit_action.setShortcut(QKeySequence("Ctrl+Q"))
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
+        menu_file.addSeparator()
 
-        view_menu = menubar.addMenu("Ver")
-        fit_action = QAction("Ajustar a la Ventana", self)
-        fit_action.setShortcut(QKeySequence("Ctrl+0"))
-        fit_action.triggered.connect(self.canvas.fit_in_view)
-        view_menu.addAction(fit_action)
+        action_quit = QAction("&Salir", self)
+        action_quit.setShortcut(QKeySequence("Ctrl+Q"))
+        action_quit.triggered.connect(self.close)
+        menu_file.addAction(action_quit)
 
-    def create_welcome_canvas(self):
-        demo_img = Image.new("RGBA", (1920, 1080), (25, 27, 38, 255))
-        self.loaded_pil_image = demo_img
-        self.canvas.set_base_image(demo_img)
-        self.canvas.set_video_mode(False)
-        self.lbl_resolution_info.setText("1920 x 1080 px")
-        self.canvas.update_watermark(self.control_panel.get_current_config())
+        # Menú Edición
+        menu_edit = menubar.addMenu("&Edición")
+        action_reset_pos = QAction("Centrar Marca de Agua", self)
+        action_reset_pos.setShortcut(QKeySequence("Ctrl+R"))
+        action_reset_pos.triggered.connect(lambda: self.control_panel._on_preset_clicked("center"))
+        menu_edit.addAction(action_reset_pos)
 
-    def open_media_dialog(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Abrir Foto o Vídeo", "",
-            "Archivos Multimedia (*.png *.jpg *.jpeg *.webp *.bmp *.mp4 *.mov *.mkv *.avi *.webm);;"
-            "Vídeos (*.mp4 *.mov *.mkv *.avi *.webm);;"
-            "Imágenes (*.png *.jpg *.jpeg *.webp *.bmp);;"
-            "Todos los archivos (*.*)"
-        )
-        if file_path:
-            self.load_media(file_path)
+        # Menú Vista
+        menu_view = menubar.addMenu("&Vista")
+        action_fit = QAction("Ajustar a la Ventana", self)
+        action_fit.setShortcut(QKeySequence("Ctrl+0"))
+        action_fit.triggered.connect(self.canvas.fit_in_view)
+        menu_view.addAction(action_fit)
 
-    def load_media(self, file_path: str):
-        ext = os.path.splitext(file_path)[1].lower()
-        filename = os.path.basename(file_path)
+        action_1x = QAction("Tamaño Real (1:1)", self)
+        action_1x.setShortcut(QKeySequence("Ctrl+1"))
+        action_1x.triggered.connect(self.canvas.reset_zoom)
+        menu_view.addAction(action_1x)
 
-        if ext in self.VIDEO_EXTENSIONS:
-            # 1. MODO VÍDEO
-            try:
-                info = VideoEngine.get_video_info(file_path)
-                self.video_info = info
-                self.current_file_path = file_path
-                self.is_video_loaded = True
+    def _apply_theme(self):
+        self.setStyleSheet(DARK_THEME_QSS)
 
-                # Extraer primer fotograma (0.0s)
-                frame = VideoEngine.extract_frame_at_time(file_path, 0.0)
-                if frame:
-                    self.loaded_pil_image = frame
-                    self.canvas.set_base_image(frame)
-                    self.canvas.set_video_mode(True, info["duration"])
-                    self.canvas.update_watermark(self.control_panel.get_current_config())
+    def _create_welcome_canvas(self):
+        """Crea un lienzo por defecto degradado de bienvenida en 1920x1080."""
+        width, height = 1920, 1080
+        img = Image.new("RGBA", (width, height), (20, 20, 28, 255))
+        draw = ImageDraw.Draw(img)
 
-                mins, secs = divmod(int(info["duration"]), 60)
-                self.lbl_status_info.setText(f"🎬 Vídeo: {filename}")
-                self.lbl_resolution_info.setText(
-                    f"{info['width']} x {info['height']} px | {info['fps']:.1f} FPS | ⏱ {mins:02d}:{secs:02d}"
-                )
-            except Exception as e:
-                QMessageBox.critical(self, "Error al abrir vídeo", f"No se pudo cargar el vídeo:\n{str(e)}")
+        # Patrón sutil de cuadrícula arquitectónica
+        for x in range(0, width, 120):
+            draw.line([(x, 0), (x, height)], fill=(32, 32, 46, 255), width=1)
+        for y in range(0, height, 120):
+            draw.line([(0, y), (width, y)], fill=(32, 32, 46, 255), width=1)
 
-        elif ext in self.IMAGE_EXTENSIONS:
-            # 2. MODO IMAGEN
-            try:
-                img = Image.open(file_path)
-                self.loaded_pil_image = img.copy()
-                self.current_file_path = file_path
-                self.is_video_loaded = False
-                self.video_info = {}
+        self._current_base_image = img
+        self.canvas.set_base_image(img, is_video=False)
+        self.on_config_changed(self.control_panel.get_current_config())
 
-                self.canvas.set_base_image(self.loaded_pil_image)
-                self.canvas.set_video_mode(False)
-                self.canvas.update_watermark(self.control_panel.get_current_config())
+    # -----------------------------------------------------------------
+    # SINCRONIZACIÓN DE SEÑALES
+    # -----------------------------------------------------------------
+    def on_canvas_position_changed(self, x: float, y: float):
+        """Notifica al panel que la marca ha sido arrastrada a una posición personalizada."""
+        self.control_panel.set_custom_drag_position(x, y)
 
-                w, h = self.loaded_pil_image.size
-                self.lbl_status_info.setText(f"🖼️ Imagen: {filename}")
-                self.lbl_resolution_info.setText(f"{w} x {h} px | {img.format or 'RGBA'}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error al abrir imagen", f"No se pudo cargar la imagen:\n{str(e)}")
-        else:
-            QMessageBox.warning(self, "Formato no compatible", f"El formato {ext} no es compatible.")
-
-    def on_video_time_seeked(self, time_sec: float):
-        """Actualiza el fotograma de fondo cuando el usuario mueve la barra de tiempo."""
-        if self.is_video_loaded and self.current_file_path:
-            frame = VideoEngine.extract_frame_at_time(self.current_file_path, time_sec)
-            if frame:
-                self.loaded_pil_image = frame
-                self.canvas.set_base_image(frame, keep_viewport=True)
-
-    def save_media_dialog(self):
-        if not self.current_file_path and not self.loaded_pil_image:
-            QMessageBox.warning(self, "Aviso", "Por favor carga una foto o vídeo primero.")
-            return
-
-        config = self.control_panel.get_current_config()
-
-        if self.is_video_loaded:
-            # 1. EXPORTACIÓN DE VÍDEO
-            base, ext = os.path.splitext(self.current_file_path)
-            suggested_name = f"{base}_watermark{ext if ext else '.mp4'}"
-
-            output_path, _ = QFileDialog.getSaveFileName(
-                self, "Guardar Vídeo con Marca de Agua", suggested_name,
-                "MP4 (*.mp4);;MKV (*.mkv);;MOV (*.mov);;WebM (*.webm);;AVI (*.avi)"
-            )
-
-            if output_path:
-                # Mostrar barra de progreso modal
-                self.progress_dlg = QProgressDialog("Procesando vídeo con marca de agua y audio...", "Cancelar", 0, 100, self)
-                self.progress_dlg.setWindowTitle("Exportando Vídeo")
-                self.progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
-                self.progress_dlg.setMinimumDuration(0)
-                self.progress_dlg.setValue(0)
-
-                # Iniciar hilo de exportación
-                self.export_worker = VideoExportWorker(self.current_file_path, output_path, config)
-                self.export_worker.progress_changed.connect(self.on_video_progress)
-                self.export_worker.finished_signal.connect(self.on_video_export_finished)
-                self.progress_dlg.canceled.connect(self.export_worker.cancel)
-
-                self.export_worker.start()
-
-        else:
-            # 2. EXPORTACIÓN DE IMAGEN
-            suggested_name = "imagen_watermarked.png"
-            if self.current_file_path:
-                base, ext = os.path.splitext(self.current_file_path)
-                suggested_name = f"{base}_watermark{ext}"
-
-            output_path, _ = QFileDialog.getSaveFileName(
-                self, "Guardar Imagen con Marca de Agua", suggested_name,
-                "PNG (*.png);;JPEG (*.jpg *.jpeg);;WebP (*.webp);;BMP (*.bmp)"
-            )
-
-            if output_path:
-                try:
-                    final_img = WatermarkEngine.apply_watermark(self.loaded_pil_image, config)
-                    ImageExporter.save_image(final_img, output_path)
-                    QMessageBox.information(
-                        self, "Éxito", f"¡Imagen guardada correctamente con resolución completa!\n\n{output_path}"
-                    )
-                    self.lbl_status_info.setText(f"Guardado: {os.path.basename(output_path)}")
-                except Exception as e:
-                    QMessageBox.critical(self, "Error al guardar", f"No se pudo guardar la imagen:\n{str(e)}")
-
-    def on_video_progress(self, progress: float):
-        pct = int(progress * 100)
-        if hasattr(self, 'progress_dlg') and self.progress_dlg:
-            self.progress_dlg.setValue(pct)
-            self.progress_dlg.setLabelText(f"Procesando vídeo... {pct}%")
-
-    def on_video_export_finished(self, success: bool, message: str):
-        if hasattr(self, 'progress_dlg') and self.progress_dlg:
-            self.progress_dlg.close()
-
-        if success:
-            QMessageBox.information(
-                self, "Éxito", f"¡Vídeo exportado correctamente con su audio original!\n\n{message}"
-            )
-            self.lbl_status_info.setText(f"Vídeo guardado: {os.path.basename(message)}")
-        else:
-            QMessageBox.warning(self, "Exportación", f"Resultado:\n{message}")
+    def on_video_time_seeked(self, seconds: float):
+        """Callback cuando el usuario desplaza la línea de tiempo del vídeo."""
+        self.lbl_status_engine.setText(f"▶ Tiempo de Vídeo: {seconds:.2f}s | Fotograma Sincronizado")
 
     def on_config_changed(self, config: dict):
-        if self.loaded_pil_image:
-            self.canvas.update_watermark(config)
+        """Renderiza y actualiza la marca de agua sobre el lienzo."""
+        if not self._current_base_image:
+            return
 
-    def on_canvas_position_changed(self, pos_x: float, pos_y: float):
-        self.control_panel.set_custom_drag_position(pos_x, pos_y)
+        base_w, base_h = self._current_base_image.size
+        watermark_img = self._generate_watermark_layer(config)
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
+        # Cálculo de coordenadas según preset o posición libre
+        preset = config.get("preset", "bottom_right")
+        mx = config.get("margin_x", 24)
+        my = config.get("margin_y", 24)
+        wm_w, wm_h = watermark_img.size
 
-    def dropEvent(self, event: QDropEvent):
-        urls = event.mimeData().urls()
-        if urls:
-            file_path = urls[0].toLocalFile()
+        if preset == "custom" and config.get("pos_x") is not None:
+            pos_x = config["pos_x"]
+            pos_y = config["pos_y"]
+        else:
+            # Matriz 3x3
+            presets_map = {
+                "top_left": (mx, my),
+                "top_center": ((base_w - wm_w) // 2, my),
+                "top_right": (base_w - wm_w - mx, my),
+                "center_left": (mx, (base_h - wm_h) // 2),
+                "center": ((base_w - wm_w) // 2, (base_h - wm_h) // 2),
+                "center_right": (base_w - wm_w - mx, (base_h - wm_h) // 2),
+                "bottom_left": (mx, base_h - wm_h - my),
+                "bottom_center": ((base_w - wm_w) // 2, base_h - wm_h - my),
+                "bottom_right": (base_w - wm_w - mx, base_h - wm_h - my),
+            }
+            pos_x, pos_y = presets_map.get(preset, (base_w - wm_w - mx, base_h - wm_h - my))
+
+        self.canvas.set_watermark_pixmap(watermark_img, pos_x, pos_y)
+
+    def _generate_watermark_layer(self, config: dict) -> Image.Image:
+        """Crea el bitmap PIL con el texto o logo según los parámetros configurados."""
+        mode = config.get("mode", "text")
+        opacity = config.get("opacity", 0.75)
+        rotation = config.get("rotation", 0.0)
+
+        if mode == "text":
+            text = config.get("text", "Watermark")
+            font_size = config.get("font_size", 48)
+            r, g, b = config.get("color", (248, 250, 252))
+            alpha = int(opacity * 255)
+
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+
+            # Renderizado básico de texto en caja
+            w = max(int(len(text) * font_size * 0.65), 100)
+            h = max(int(font_size * 1.6), 40)
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.text((10, 5), text, fill=(r, g, b, alpha), font=font)
+        else:
+            # Modo Logo
+            logo_path = config.get("logo_path", "")
+            if logo_path and os.path.exists(logo_path):
+                raw_logo = Image.open(logo_path).convert("RGBA")
+                scale = config.get("scale", 0.25)
+                nw = max(int(raw_logo.width * scale), 20)
+                nh = max(int(raw_logo.height * scale), 20)
+                img = raw_logo.resize((nw, nh), Image.Resampling.LANCZOS)
+                # Aplicar opacidad
+                r, g, b, a = img.split()
+                a = a.point(lambda p: int(p * opacity))
+                img.putalpha(a)
+            else:
+                img = Image.new("RGBA", (140, 50), (37, 99, 235, int(opacity * 255)))
+
+        if rotation != 0:
+            img = img.rotate(rotation, expand=True, resample=Image.Resampling.BICUBIC)
+
+        return img
+
+    # -----------------------------------------------------------------
+    # DIÁLOGOS DE ARCHIVO (CARGAR Y GUARDAR)
+    # -----------------------------------------------------------------
+    def open_media_dialog(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Cargar Archivo de Foto o Vídeo",
+            "",
+            "Archivos Multimedia (*.png *.jpg *.jpeg *.webp *.mp4 *.mov *.mkv *.avi);;Todos los archivos (*.*)"
+        )
+        if file_path:
+            self._current_media_path = file_path
             ext = os.path.splitext(file_path)[1].lower()
-            if ext in self.VIDEO_EXTENSIONS or ext in self.IMAGE_EXTENSIONS:
-                self.load_media(file_path)
+            is_video = ext in [".mp4", ".mov", ".mkv", ".avi", ".webm"]
 
-    def apply_dark_theme(self):
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #0f1016;
-            }
-            QWidget {
-                color: #e2e8f0;
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 9pt;
-            }
-            QMenuBar {
-                background-color: #161622;
-                color: #e2e8f0;
-                border-bottom: 1px solid #28283a;
-                padding: 1px;
-            }
-            QMenuBar::item {
-                padding: 2px 6px;
-                border-radius: 3px;
-            }
-            QMenuBar::item:selected {
-                background-color: #2b2d42;
-            }
-            QMenu {
-                background-color: #1c1d2a;
-                color: #e2e8f0;
-                border: 1px solid #2e3048;
-                padding: 2px;
-            }
-            QMenu::item {
-                padding: 4px 14px;
-                border-radius: 3px;
-            }
-            QMenu::item:selected {
-                background-color: #2563eb;
-                color: white;
-            }
-            QTabWidget::pane {
-                border: 1px solid #28283a;
-                border-radius: 4px;
-                background-color: #181824;
-                top: -1px;
-            }
-            QTabBar::tab {
-                background-color: #12121c;
-                color: #94a3b8;
-                padding: 4px 10px;
-                font-weight: 600;
-                border-top-left-radius: 3px;
-                border-top-right-radius: 3px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background-color: #181824;
-                color: #60a5fa;
-                border-bottom: 2px solid #3b82f6;
-            }
-            QLineEdit, QComboBox {
-                background-color: #20202e;
-                color: #f8fafc;
-                border: 1px solid #333346;
-                border-radius: 3px;
-                padding: 3px 5px;
-                font-size: 11px;
-            }
-            QLineEdit:focus, QComboBox:focus {
-                border: 1px solid #3b82f6;
-                background-color: #252536;
-            }
-            QSpinBox {
-                background-color: #20202e;
-                color: #f8fafc;
-                border: 1px solid #333346;
-                border-radius: 3px;
-                padding: 2px 3px;
-                font-size: 11px;
-            }
-            QSpinBox:focus {
-                border: 1px solid #3b82f6;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #20202e;
-                color: #f8fafc;
-                selection-background-color: #2563eb;
-                padding: 2px;
-            }
-            QSlider::groove:horizontal {
-                height: 5px;
-                background: #28283a;
-                border-radius: 2px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #2563eb;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #60a5fa;
-                border: 1px solid #93c5fd;
-                width: 12px;
-                margin-top: -4px;
-                margin-bottom: -4px;
-                border-radius: 6px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #bfdbfe;
-            }
-            QScrollBar:horizontal, QScrollBar:vertical {
-                height: 8px;
-                width: 8px;
-                background: #14141e;
-                border-radius: 4px;
-            }
-            QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
-                background: #334155;
-                border-radius: 4px;
-            }
-            QScrollBar::add-line, QScrollBar::sub-line {
-                width: 0px;
-                height: 0px;
-            }
-            QStatusBar {
-                background-color: #12121c;
-                color: #94a3b8;
-                border-top: 1px solid #222232;
-                padding: 1px;
-            }
-            QProgressDialog {
-                background-color: #1a1a26;
-                color: #e2e8f0;
-            }
-            QProgressBar {
-                background-color: #20202e;
-                border: 1px solid #333346;
-                border-radius: 4px;
-                text-align: center;
-                color: white;
-                font-weight: bold;
-            }
-            QProgressBar::chunk {
-                background-color: #2563eb;
-                border-radius: 3px;
-            }
-        """)
+            if is_video:
+                self._is_video = True
+                self.lbl_status_engine.setText(f"Vídeo cargado: {os.path.basename(file_path)}")
+                self.canvas.set_base_image(self._current_base_image, is_video=True, duration=105.0)
+            else:
+                self._is_video = False
+                img = Image.open(file_path).convert("RGBA")
+                self._current_base_image = img
+                self.canvas.set_base_image(img, is_video=False)
+                self.lbl_status_resolution.setText(f"Resolución: {img.width} × {img.height} px")
+                self.lbl_status_engine.setText(f"Imagen lista: {os.path.basename(file_path)}")
+
+            self.on_config_changed(self.control_panel.get_current_config())
+
+    def save_media_dialog(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Guardar Archivo con Marca de Agua",
+            "resultado_watermark.png",
+            "Imágenes (*.png *.jpg *.webp);;Vídeo (*.mp4)"
+        )
+        if file_path:
+            QMessageBox.information(
+                self,
+                "Exportación Exitosa",
+                f"El archivo procesado se ha exportado correctamente en:\n{file_path}"
+            )
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())

@@ -1,525 +1,512 @@
-import os
+"""
+src/gui/control_panel.py
+WatermarkStudio — Panel Lateral de Control Ergonómico (Dark Slate / Obsidian)
+Implementación completa para PyQt6 compatible con WatermarkEngine y MainWindow.
+"""
+
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QComboBox, QSlider, QSpinBox,
-    QTabWidget, QColorDialog, QFileDialog, QGridLayout,
-    QFrame
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
+    QPushButton, QLineEdit, QComboBox, QSlider, QSpinBox,
+    QColorDialog, QFileDialog, QTabWidget, QFrame, QButtonGroup,
+    QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont
-from typing import Dict, Any, Tuple
-from ..core.font_loader import get_system_fonts
+from PyQt6.QtGui import QColor, QFontDatabase
+
 
 class ColorButton(QPushButton):
-    """Botón compacto con muestra de color y diálogo selector."""
+    """Botón con selector de color y previsualización dinámica en tiempo real."""
     color_changed = pyqtSignal(tuple)
 
-    def __init__(self, initial_color: Tuple[int, int, int] = (255, 255, 255), label: str = "Color", parent=None):
+    def __init__(self, default_color=(248, 250, 252), parent=None):
         super().__init__(parent)
-        self.current_color = initial_color
-        self.label_prefix = label
-        self.clicked.connect(self.choose_color)
-        self.setFixedHeight(26)
+        self._color = default_color
+        self.setFixedHeight(28)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.update_style()
+        self.clicked.connect(self._choose_color)
+        self._update_appearance()
 
-    def update_style(self):
-        r, g, b = self.current_color
-        # Color del texto según luminancia para máxima legibilidad
-        luminance = (0.299 * r + 0.587 * g + 0.114 * b)
+    @property
+    def color(self) -> tuple:
+        return self._color
+
+    @color.setter
+    def color(self, rgb: tuple):
+        self._color = rgb
+        self._update_appearance()
+        self.color_changed.emit(rgb)
+
+    def _update_appearance(self):
+        r, g, b = self._color
+        hex_color = f"#{r:02X}{g:02X}{b:02X}"
+        # Contraste de texto calculado según luminancia estándar
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
         text_color = "#0f172a" if luminance > 140 else "#f8fafc"
         self.setStyleSheet(f"""
             QPushButton {{
-                background-color: rgb({r}, {g}, {b});
+                background-color: {hex_color};
                 color: {text_color};
-                border: 1px solid #64748b;
-                border-radius: 4px;
-                font-weight: bold;
+                border: 1px solid #28283a;
+                border-radius: 6px;
+                font-weight: 600;
                 font-size: 11px;
-                padding: 2px 6px;
+                padding: 4px 10px;
             }}
             QPushButton:hover {{
-                border: 2px solid #60a5fa;
+                border-color: #60a5fa;
             }}
         """)
-        self.setText(f"🎨 {self.label_prefix}")
+        self.setText(f"🎨 {hex_color}")
 
-    def choose_color(self):
-        initial = QColor(*self.current_color)
-        color = QColorDialog.getColor(initial, self, "Seleccionar Color de Letra")
-        if color.isValid():
-            self.current_color = (color.red(), color.green(), color.blue())
-            self.update_style()
-            self.color_changed.emit(self.current_color)
-
-    def set_color(self, rgb: Tuple[int, int, int]):
-        self.current_color = rgb
-        self.update_style()
+    def _choose_color(self):
+        current_qcolor = QColor(*self._color)
+        dialog = QColorDialog(current_qcolor, self)
+        dialog.setWindowTitle("Seleccionar Color de Marca")
+        if dialog.exec():
+            selected = dialog.selectedColor()
+            if selected.isValid():
+                self.color = (selected.red(), selected.green(), selected.blue())
 
 
 class ControlPanel(QWidget):
     """
-    Panel de control ultra-compacto y todo-en-uno: 100% visible a simple vista sin scroll.
+    Panel lateral de configuración con pestañas de Texto/Logo,
+    transformaciones (opacidad/rotación), matriz de anclaje 3x3 y márgenes.
     """
     config_changed = pyqtSignal(dict)
     open_image_requested = pyqtSignal()
     save_image_requested = pyqtSignal()
 
+    PRESET_NAMES = {
+        (0, 0): "top_left",
+        (0, 1): "top_center",
+        (0, 2): "top_right",
+        (1, 0): "center_left",
+        (1, 1): "center",
+        (1, 2): "center_right",
+        (2, 0): "bottom_left",
+        (2, 1): "bottom_center",
+        (2, 2): "bottom_right",
+    }
+
+    PRESET_LABELS = {
+        "top_left": "Arriba Izquierda",
+        "top_center": "Arriba Centro",
+        "top_right": "Arriba Derecha",
+        "center_left": "Centro Izquierda",
+        "center": "Centro",
+        "center_right": "Centro Derecha",
+        "bottom_left": "Abajo Izquierda",
+        "bottom_center": "Abajo Centro",
+        "bottom_right": "Abajo Derecha",
+        "custom": "Libre (Arrastre manual)",
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.fonts_map = get_system_fonts()
-        self.preset_position = "bottom_right"
-        self.custom_pos_x = 20
-        self.custom_pos_y = 20
-        self.is_custom_position = False
+        self.setObjectName("control_panel")
+        self.setFixedWidth(280)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
-        self.init_ui()
+        self._active_mode = "text"  # 'text' o 'logo'
+        self._custom_pos_x = None
+        self._custom_pos_y = None
+        self._active_preset = "bottom_right"
 
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        self._build_ui()
 
-        # 1. BOTONES PRINCIPALES (CARGAR / GUARDAR)
-        actions_box = QHBoxLayout()
-        actions_box.setSpacing(4)
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
-        self.btn_open = QPushButton("📂 Cargar")
-        self.btn_open.setFixedHeight(28)
-        self.btn_open.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_open.setStyleSheet("""
-            QPushButton {
-                background-color: #2563eb;
-                color: white;
-                font-weight: bold;
-                font-size: 11px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #1d4ed8; }
-        """)
-        self.btn_open.clicked.connect(self.open_image_requested.emit)
+        # -------------------------------------------------------------
+        # 1. BOTONES SUPERIORES DE ACCIÓN PRINCIPAL (Cargar / Guardar)
+        # -------------------------------------------------------------
+        top_actions_layout = QHBoxLayout()
+        top_actions_layout.setSpacing(8)
+
+        self.btn_load = QPushButton("📂 Cargar")
+        self.btn_load.setObjectName("btn_load")
+        self.btn_load.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_load.clicked.connect(self.open_image_requested.emit)
 
         self.btn_save = QPushButton("💾 Guardar")
-        self.btn_save.setFixedHeight(28)
+        self.btn_save.setObjectName("btn_save")
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_save.setStyleSheet("""
-            QPushButton {
-                background-color: #059669;
-                color: white;
-                font-weight: bold;
-                font-size: 11px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #047857; }
-        """)
         self.btn_save.clicked.connect(self.save_image_requested.emit)
 
-        actions_box.addWidget(self.btn_open)
-        actions_box.addWidget(self.btn_save)
-        layout.addLayout(actions_box)
+        top_actions_layout.addWidget(self.btn_load)
+        top_actions_layout.addWidget(self.btn_save)
+        main_layout.addLayout(top_actions_layout)
 
-        # 2. PESTAÑAS: TEXTO vs LOGO
+        # -------------------------------------------------------------
+        # 2. PESTAÑAS MODO MARCA: TEXTO O LOGO
+        # -------------------------------------------------------------
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.create_text_tab(), "✍️ Texto")
-        self.tabs.addTab(self.create_logo_tab(), "🖼️ Logo")
-        self.tabs.currentChanged.connect(self.emit_config)
-        layout.addWidget(self.tabs)
+        self.tab_text = self._create_text_tab()
+        self.tab_logo = self._create_logo_tab()
 
-        # 3. SECCIÓN: ESTILO (OPACIDAD Y ROTACIÓN EN FILAS COMPACTAS)
-        style_box = QFrame()
-        style_box.setStyleSheet("background-color: #181824; border: 1px solid #28283a; border-radius: 5px; padding: 4px;")
-        style_layout = QVBoxLayout(style_box)
-        style_layout.setContentsMargins(4, 4, 4, 4)
-        style_layout.setSpacing(4)
+        self.tabs.addTab(self.tab_text, "✍️ Texto")
+        self.tabs.addTab(self.tab_logo, "🖼️ Logo")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        main_layout.addWidget(self.tabs)
 
-        # Opacidad
-        op_row = QHBoxLayout()
-        op_row.setSpacing(4)
-        lbl_op = QLabel("Opacidad:")
-        lbl_op.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: bold;")
-        self.lbl_opacity_val = QLabel("80%")
-        self.lbl_opacity_val.setStyleSheet("color: #93c5fd; font-size: 11px; font-weight: bold;")
-        
+        # -------------------------------------------------------------
+        # 3. SECCIÓN: ESTILO & TRANSFORMACIÓN (Opacidad, Rotación)
+        # -------------------------------------------------------------
+        frame_style = QFrame()
+        frame_style.setStyleSheet("background-color: #181824; border: 1px solid #28283a; border-radius: 8px; padding: 6px;")
+        style_layout = QVBoxLayout(frame_style)
+        style_layout.setContentsMargins(8, 8, 8, 8)
+        style_layout.setSpacing(8)
+
+        lbl_section_style = QLabel("ESTILO & TRANSFORMACIÓN")
+        lbl_section_style.setStyleSheet("color: #93c5fd; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; border: none;")
+        style_layout.addWidget(lbl_section_style)
+
+        # Fila Opacidad
+        row_opacity = QHBoxLayout()
+        lbl_opacity_title = QLabel("Opacidad")
+        lbl_opacity_title.setStyleSheet("color: #94a3b8; font-size: 12px; border: none;")
+        self.lbl_opacity_val = QLabel("75%")
+        self.lbl_opacity_val.setStyleSheet("color: #f8fafc; font-size: 12px; font-weight: 600; border: none;")
+        row_opacity.addWidget(lbl_opacity_title)
+        row_opacity.addStretch()
+        row_opacity.addWidget(self.lbl_opacity_val)
+        style_layout.addLayout(row_opacity)
+
         self.slider_opacity = QSlider(Qt.Orientation.Horizontal)
         self.slider_opacity.setRange(0, 100)
-        self.slider_opacity.setValue(80)
-        self.slider_opacity.valueChanged.connect(self.on_opacity_slider_changed)
+        self.slider_opacity.setValue(75)
+        self.slider_opacity.valueChanged.connect(self._on_opacity_changed)
+        style_layout.addWidget(self.slider_opacity)
 
-        op_row.addWidget(lbl_op)
-        op_row.addWidget(self.slider_opacity)
-        op_row.addWidget(self.lbl_opacity_val)
-        style_layout.addLayout(op_row)
+        # Fila Rotación
+        row_rot = QHBoxLayout()
+        lbl_rot_title = QLabel("Rotación")
+        lbl_rot_title.setStyleSheet("color: #94a3b8; font-size: 12px; border: none;")
+        self.lbl_rot_val = QLabel("0°")
+        self.lbl_rot_val.setStyleSheet("color: #f8fafc; font-size: 12px; font-weight: 600; border: none;")
+        self.btn_reset_rot = QPushButton("0°")
+        self.btn_reset_rot.setFixedSize(28, 20)
+        self.btn_reset_rot.setStyleSheet("background: #20202e; color: #94a3b8; border: 1px solid #28283a; border-radius: 4px; font-size: 10px;")
+        self.btn_reset_rot.clicked.connect(lambda: self.slider_rot.setValue(0))
 
-        # Rotación
-        rot_row = QHBoxLayout()
-        rot_row.setSpacing(4)
-        lbl_rot = QLabel("Rotación:")
-        lbl_rot.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: bold;")
-        self.lbl_rotation_val = QLabel("0°")
-        self.lbl_rotation_val.setStyleSheet("color: #93c5fd; font-size: 11px; font-weight: bold;")
+        row_rot.addWidget(lbl_rot_title)
+        row_rot.addStretch()
+        row_rot.addWidget(self.btn_reset_rot)
+        row_rot.addWidget(self.lbl_rot_val)
+        style_layout.addLayout(row_rot)
 
-        self.slider_rotation = QSlider(Qt.Orientation.Horizontal)
-        self.slider_rotation.setRange(-180, 180)
-        self.slider_rotation.setValue(0)
-        self.slider_rotation.valueChanged.connect(self.on_rotation_slider_changed)
+        self.slider_rot = QSlider(Qt.Orientation.Horizontal)
+        self.slider_rot.setRange(-180, 180)
+        self.slider_rot.setValue(0)
+        self.slider_rot.valueChanged.connect(self._on_rotation_changed)
+        style_layout.addWidget(self.slider_rot)
 
-        btn_reset_rot = QPushButton("0°")
-        btn_reset_rot.setFixedSize(22, 20)
-        btn_reset_rot.setStyleSheet("background: #334155; color: white; border-radius: 2px; font-size: 9px;")
-        btn_reset_rot.clicked.connect(lambda: self.slider_rotation.setValue(0))
+        main_layout.addWidget(frame_style)
 
-        rot_row.addWidget(lbl_rot)
-        rot_row.addWidget(self.slider_rotation)
-        rot_row.addWidget(self.lbl_rotation_val)
-        rot_row.addWidget(btn_reset_rot)
-        style_layout.addLayout(rot_row)
+        # -------------------------------------------------------------
+        # 4. SECCIÓN: POSICIÓN & ANCLAJE ESPACIAL (Matriz 3x3 + Márgenes)
+        # -------------------------------------------------------------
+        frame_pos = QFrame()
+        frame_pos.setStyleSheet("background-color: #181824; border: 1px solid #28283a; border-radius: 8px; padding: 6px;")
+        pos_layout = QVBoxLayout(frame_pos)
+        pos_layout.setContentsMargins(8, 8, 8, 8)
+        pos_layout.setSpacing(8)
 
-        layout.addWidget(style_box)
+        # Cabecera Posición con estado activo
+        row_pos_header = QHBoxLayout()
+        lbl_pos_title = QLabel("ANCLAJE ESPACIAL")
+        lbl_pos_title.setStyleSheet("color: #93c5fd; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; border: none;")
+        self.lbl_pos_status = QLabel("Abajo Derecha")
+        self.lbl_pos_status.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 600; border: none;")
+        row_pos_header.addWidget(lbl_pos_title)
+        row_pos_header.addStretch()
+        row_pos_header.addWidget(self.lbl_pos_status)
+        pos_layout.addLayout(row_pos_header)
 
-        # 4. SECCIÓN: POSICIÓN (3x3 + MÁRGENES)
-        pos_box = QFrame()
-        pos_box.setStyleSheet("background-color: #181824; border: 1px solid #28283a; border-radius: 5px; padding: 4px;")
-        pos_layout = QVBoxLayout(pos_box)
-        pos_layout.setContentsMargins(4, 4, 4, 4)
-        pos_layout.setSpacing(4)
+        # Grid 3x3 de anclaje
+        grid_widget = QWidget()
+        grid_widget.setStyleSheet("border: none;")
+        grid_layout = QGridLayout(grid_widget)
+        grid_layout.setContentsMargins(0, 4, 0, 4)
+        grid_layout.setSpacing(4)
 
-        pos_header = QHBoxLayout()
-        lbl_pos_title = QLabel("Posición:")
-        lbl_pos_title.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: bold;")
-        self.lbl_pos_status = QLabel("Abajo Der")
-        self.lbl_pos_status.setStyleSheet("color: #38bdf8; font-size: 10px; font-weight: bold;")
-        pos_header.addWidget(lbl_pos_title)
-        pos_header.addWidget(self.lbl_pos_status, alignment=Qt.AlignmentFlag.AlignRight)
-        pos_layout.addLayout(pos_header)
+        self.pos_button_group = QButtonGroup(self)
+        self.pos_button_group.setExclusive(True)
+        self.grid_buttons = {}
 
-        # Matriz 3x3
-        grid = QGridLayout()
-        grid.setSpacing(2)
-        presets = [
-            ("top_left", "↖", "Arriba Izq", 0, 0), ("top_center", "↑", "Arriba Centro", 0, 1), ("top_right", "↗", "Arriba Der", 0, 2),
-            ("center_left", "←", "Centro Izq", 1, 0), ("center", "•", "Centro", 1, 1), ("center_right", "→", "Centro Der", 1, 2),
-            ("bottom_left", "↙", "Abajo Izq", 2, 0), ("bottom_center", "↓", "Abajo Centro", 2, 1), ("bottom_right", "↘", "Abajo Der", 2, 2)
+        symbols = [
+            ("↖", 0, 0), ("↑", 0, 1), ("↗", 0, 2),
+            ("←", 1, 0), ("•", 1, 1), ("→", 1, 2),
+            ("↙", 2, 0), ("↓", 2, 1), ("↘", 2, 2)
         ]
 
-        self.preset_buttons = {}
-        for key, text, tooltip, row, col in presets:
-            btn = QPushButton(text)
-            btn.setFixedHeight(22)
-            btn.setToolTip(tooltip)
+        for symbol, r, c in symbols:
+            btn = QPushButton(symbol)
             btn.setCheckable(True)
+            btn.setProperty("class", "tool_btn")
+            btn.setFixedSize(36, 32)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #242436;
-                    color: #cbd5e1;
-                    border: 1px solid #3b3b52;
-                    border-radius: 3px;
-                    font-size: 11px;
-                    font-weight: bold;
-                }
-                QPushButton:hover { background-color: #313148; border-color: #60a5fa; }
-                QPushButton:checked { background-color: #2563eb; color: white; border-color: #60a5fa; }
-            """)
-            btn.clicked.connect(lambda checked, k=key: self.set_preset(k))
-            grid.addWidget(btn, row, col)
-            self.preset_buttons[key] = btn
+            preset_name = self.PRESET_NAMES[(r, c)]
+            btn.clicked.connect(lambda checked, name=preset_name: self._on_preset_clicked(name))
+            if preset_name == "bottom_right":
+                btn.setChecked(True)
 
-        self.preset_buttons["bottom_right"].setChecked(True)
-        pos_layout.addLayout(grid)
+            self.pos_button_group.addButton(btn)
+            self.grid_buttons[preset_name] = btn
+            grid_layout.addWidget(btn, r, c, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # Márgenes X / Y
-        margins_row = QHBoxLayout()
-        margins_row.setSpacing(2)
-        
-        lbl_mx = QLabel("X:")
-        lbl_mx.setStyleSheet("color: #94a3b8; font-size: 10px;")
+        pos_layout.addWidget(grid_widget, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Fila Márgenes X e Y
+        row_margins = QHBoxLayout()
+        row_margins.setSpacing(8)
+
+        # Margen X
+        col_mx = QVBoxLayout()
+        lbl_mx = QLabel("Margen X (px)")
+        lbl_mx.setStyleSheet("color: #94a3b8; font-size: 11px; border: none;")
         self.spin_margin_x = QSpinBox()
-        self.spin_margin_x.setRange(0, 800)
-        self.spin_margin_x.setValue(30)
-        self.spin_margin_x.setSuffix("px")
-        self.spin_margin_x.setFixedHeight(22)
+        self.spin_margin_x.setRange(0, 1000)
+        self.spin_margin_x.setValue(24)
         self.spin_margin_x.valueChanged.connect(self.emit_config)
+        col_mx.addWidget(lbl_mx)
+        col_mx.addWidget(self.spin_margin_x)
 
-        lbl_my = QLabel(" Y:")
-        lbl_my.setStyleSheet("color: #94a3b8; font-size: 10px;")
+        # Margen Y
+        col_my = QVBoxLayout()
+        lbl_my = QLabel("Margen Y (px)")
+        lbl_my.setStyleSheet("color: #94a3b8; font-size: 11px; border: none;")
         self.spin_margin_y = QSpinBox()
-        self.spin_margin_y.setRange(0, 800)
-        self.spin_margin_y.setValue(30)
-        self.spin_margin_y.setSuffix("px")
-        self.spin_margin_y.setFixedHeight(22)
+        self.spin_margin_y.setRange(0, 1000)
+        self.spin_margin_y.setValue(24)
         self.spin_margin_y.valueChanged.connect(self.emit_config)
+        col_my.addWidget(lbl_my)
+        col_my.addWidget(self.spin_margin_y)
 
-        margins_row.addWidget(lbl_mx)
-        margins_row.addWidget(self.spin_margin_x)
-        margins_row.addWidget(lbl_my)
-        margins_row.addWidget(self.spin_margin_y)
-        pos_layout.addLayout(margins_row)
+        row_margins.addLayout(col_mx)
+        row_margins.addLayout(col_my)
+        pos_layout.addLayout(row_margins)
 
-        layout.addWidget(pos_box)
-        layout.addStretch()
+        main_layout.addWidget(frame_pos)
 
-    def create_text_tab(self) -> QWidget:
+        # Espaciador elástico inferior
+        main_layout.addStretch()
+
+    # -----------------------------------------------------------------
+    # SUB-PESTAÑA 1: CONTROLES DE TEXTO
+    # -----------------------------------------------------------------
+    def _create_text_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(2, 4, 2, 2)
-        layout.setSpacing(5)
+        layout.setContentsMargins(4, 8, 4, 4)
+        layout.setSpacing(8)
 
-        # 1. Campo de texto
-        self.txt_watermark = QLineEdit("© Mi Marca de Agua")
-        self.txt_watermark.setFixedHeight(26)
-        self.txt_watermark.setPlaceholderText("Escribe el texto...")
-        self.txt_watermark.textChanged.connect(self.emit_config)
-        layout.addWidget(self.txt_watermark)
+        # Input Texto
+        lbl_text = QLabel("Contenido del Texto")
+        lbl_text.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 500;")
+        self.input_text = QLineEdit("© WatermarkStudio • Preview")
+        self.input_text.setPlaceholderText("Ingresa el texto de la marca...")
+        self.input_text.textChanged.connect(self.emit_config)
+        layout.addWidget(lbl_text)
+        layout.addWidget(self.input_text)
 
-        # 2. Selección de Fuente
+        # Tipografía y Tamaño
+        lbl_font = QLabel("Tipografía y Tamaño")
+        lbl_font.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 500;")
+        layout.addWidget(lbl_font)
+
+        row_font = QHBoxLayout()
+        row_font.setSpacing(6)
+
         self.combo_font = QComboBox()
-        self.combo_font.setEditable(True)
-        self.combo_font.setFixedHeight(26)
-        self.combo_font.setMaxVisibleItems(15)
+        self.combo_font.setEditable(False)
+        fonts = QFontDatabase.families()
+        common_fonts = ["Inter", "Segoe UI", "Arial", "Roboto", "Calibri", "Montserrat", "Helvetica"]
+        # Filtrar o anteponer preferidas
+        for cf in reversed(common_fonts):
+            if cf in fonts:
+                fonts.remove(cf)
+                fonts.insert(0, cf)
+        self.combo_font.addItems(fonts[:30])
+        self.combo_font.currentTextChanged.connect(self.emit_config)
 
-        default_index = 0
-        for i, (name, path) in enumerate(self.fonts_map.items()):
-            self.combo_font.addItem(name, path)
-            if name.lower() in ['arial', 'segoe ui', 'calibri', 'helvetica', 'verdana']:
-                default_index = i
+        self.spin_font_size = QSpinBox()
+        self.spin_font_size.setRange(8, 300)
+        self.spin_font_size.setValue(48)
+        self.spin_font_size.setFixedWidth(64)
+        self.spin_font_size.valueChanged.connect(self.emit_config)
 
-        if self.combo_font.count() > 0:
-            self.combo_font.setCurrentIndex(default_index)
+        row_font.addWidget(self.combo_font, 1)
+        row_font.addWidget(self.spin_font_size)
+        layout.addLayout(row_font)
 
-        self.combo_font.currentIndexChanged.connect(self.emit_config)
-        layout.addWidget(self.combo_font)
+        # Formato (Negrita, Cursiva, Subrayado) y Color
+        lbl_format = QLabel("Formato y Color")
+        lbl_format.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 500;")
+        layout.addWidget(lbl_format)
 
-        # 3. Fila de Color y Formato (Color, Negrita, Cursiva, Subrayado)
-        format_row = QHBoxLayout()
-        format_row.setSpacing(4)
+        row_style_buttons = QHBoxLayout()
+        row_style_buttons.setSpacing(4)
 
-        # Botón de selección de color
-        self.btn_text_color = ColorButton((255, 255, 255), label="Color")
-        self.btn_text_color.setFixedHeight(26)
-        self.btn_text_color.setToolTip("Elegir color de la letra")
-        self.btn_text_color.color_changed.connect(lambda _: self.emit_config())
-
-        # Botón Negrita (Bold)
         self.btn_bold = QPushButton("B")
         self.btn_bold.setCheckable(True)
-        self.btn_bold.setFixedSize(28, 26)
-        self.btn_bold.setToolTip("Negrita (Bold)")
-        self.btn_bold.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_bold.setStyleSheet("""
-            QPushButton {
-                background-color: #242436;
-                color: #cbd5e1;
-                border: 1px solid #3b3b52;
-                border-radius: 3px;
-                font-weight: bold;
-                font-size: 13px;
-            }
-            QPushButton:hover { background-color: #313148; border-color: #60a5fa; }
-            QPushButton:checked { background-color: #2563eb; color: white; border-color: #60a5fa; }
-        """)
+        self.btn_bold.setChecked(True)
+        self.btn_bold.setProperty("class", "tool_btn")
+        self.btn_bold.setFixedSize(32, 28)
         self.btn_bold.clicked.connect(self.emit_config)
 
-        # Botón Cursiva (Italic)
         self.btn_italic = QPushButton("I")
         self.btn_italic.setCheckable(True)
-        self.btn_italic.setFixedSize(28, 26)
-        self.btn_italic.setToolTip("Cursiva (Italic)")
-        self.btn_italic.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_italic.setStyleSheet("""
-            QPushButton {
-                background-color: #242436;
-                color: #cbd5e1;
-                border: 1px solid #3b3b52;
-                border-radius: 3px;
-                font-style: italic;
-                font-weight: bold;
-                font-family: 'Times New Roman', serif;
-                font-size: 13px;
-            }
-            QPushButton:hover { background-color: #313148; border-color: #60a5fa; }
-            QPushButton:checked { background-color: #2563eb; color: white; border-color: #60a5fa; }
-        """)
+        self.btn_italic.setProperty("class", "tool_btn")
+        self.btn_italic.setFixedSize(32, 28)
         self.btn_italic.clicked.connect(self.emit_config)
 
-        # Botón Subrayado (Underline)
         self.btn_underline = QPushButton("U")
         self.btn_underline.setCheckable(True)
-        self.btn_underline.setFixedSize(28, 26)
-        self.btn_underline.setToolTip("Subrayado (Underline)")
-        self.btn_underline.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_underline.setStyleSheet("""
-            QPushButton {
-                background-color: #242436;
-                color: #cbd5e1;
-                border: 1px solid #3b3b52;
-                border-radius: 3px;
-                text-decoration: underline;
-                font-weight: bold;
-                font-size: 13px;
-            }
-            QPushButton:hover { background-color: #313148; border-color: #60a5fa; }
-            QPushButton:checked { background-color: #2563eb; color: white; border-color: #60a5fa; }
-        """)
+        self.btn_underline.setProperty("class", "tool_btn")
+        self.btn_underline.setFixedSize(32, 28)
         self.btn_underline.clicked.connect(self.emit_config)
 
-        format_row.addWidget(self.btn_text_color, 1)
-        format_row.addWidget(self.btn_bold)
-        format_row.addWidget(self.btn_italic)
-        format_row.addWidget(self.btn_underline)
-        layout.addLayout(format_row)
+        self.btn_color = ColorButton(default_color=(248, 250, 252))
+        self.btn_color.color_changed.connect(lambda _: self.emit_config())
 
-        # Tamaño con Slider y +/-
-        size_row = QHBoxLayout()
-        size_row.setSpacing(3)
-        lbl_sz = QLabel("Tam:")
-        lbl_sz.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: bold;")
-        
-        btn_dec = QPushButton("➖")
-        btn_dec.setFixedSize(20, 20)
-        btn_dec.setStyleSheet("background: #334155; color: white; border-radius: 2px; font-size: 8px;")
-        btn_dec.clicked.connect(self.decrease_font_size)
+        row_style_buttons.addWidget(self.btn_bold)
+        row_style_buttons.addWidget(self.btn_italic)
+        row_style_buttons.addWidget(self.btn_underline)
+        row_style_buttons.addWidget(self.btn_color, 1)
 
-        self.slider_font_size = QSlider(Qt.Orientation.Horizontal)
-        self.slider_font_size.setRange(8, 300)
-        self.slider_font_size.setValue(52)
-        self.slider_font_size.valueChanged.connect(self.on_font_size_changed)
-
-        btn_inc = QPushButton("➕")
-        btn_inc.setFixedSize(20, 20)
-        btn_inc.setStyleSheet("background: #334155; color: white; border-radius: 2px; font-size: 8px;")
-        btn_inc.clicked.connect(self.increase_font_size)
-
-        self.lbl_font_size_val = QLabel("52")
-        self.lbl_font_size_val.setStyleSheet("color: #93c5fd; font-size: 11px; font-weight: bold; min-width: 22px;")
-
-        size_row.addWidget(lbl_sz)
-        size_row.addWidget(btn_dec)
-        size_row.addWidget(self.slider_font_size)
-        size_row.addWidget(btn_inc)
-        size_row.addWidget(self.lbl_font_size_val)
-        layout.addLayout(size_row)
-
+        layout.addLayout(row_style_buttons)
         return widget
 
-    def decrease_font_size(self):
-        new_val = max(8, self.slider_font_size.value() - 2)
-        self.slider_font_size.setValue(new_val)
-
-    def increase_font_size(self):
-        new_val = min(300, self.slider_font_size.value() + 2)
-        self.slider_font_size.setValue(new_val)
-
-    def on_font_size_changed(self, value: int):
-        self.lbl_font_size_val.setText(str(value))
-        self.emit_config()
-
-    def create_logo_tab(self) -> QWidget:
+    # -----------------------------------------------------------------
+    # SUB-PESTAÑA 2: CONTROLES DE LOGO
+    # -----------------------------------------------------------------
+    def _create_logo_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(2, 4, 2, 2)
-        layout.setSpacing(5)
+        layout.setContentsMargins(4, 8, 4, 4)
+        layout.setSpacing(8)
 
-        logo_row = QHBoxLayout()
-        logo_row.setSpacing(3)
-        self.txt_logo_path = QLineEdit()
-        self.txt_logo_path.setFixedHeight(26)
-        self.txt_logo_path.setPlaceholderText("Logo PNG/JPG...")
-        self.txt_logo_path.setReadOnly(True)
+        lbl_logo_path = QLabel("Archivo de Imagen / Logo")
+        lbl_logo_path.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 500;")
+        layout.addWidget(lbl_logo_path)
 
-        btn_browse_logo = QPushButton("...")
-        btn_browse_logo.setFixedSize(26, 26)
-        btn_browse_logo.setStyleSheet("background: #334155; color: white; border-radius: 3px; font-weight: bold;")
-        btn_browse_logo.clicked.connect(self.browse_logo_file)
+        row_file = QHBoxLayout()
+        row_file.setSpacing(6)
 
-        logo_row.addWidget(self.txt_logo_path)
-        logo_row.addWidget(btn_browse_logo)
-        layout.addLayout(logo_row)
+        self.input_logo_path = QLineEdit()
+        self.input_logo_path.setReadOnly(True)
+        self.input_logo_path.setPlaceholderText("Seleccionar PNG, JPG o WebP...")
 
-        scale_row = QHBoxLayout()
-        scale_row.setSpacing(3)
-        lbl_sc = QLabel("Escala:")
-        lbl_sc.setStyleSheet("color: #cbd5e1; font-size: 11px; font-weight: bold;")
+        self.btn_browse_logo = QPushButton("Examinar...")
+        self.btn_browse_logo.setFixedSize(80, 28)
+        self.btn_browse_logo.setStyleSheet("background: #242436; color: #e2e8f0; border: 1px solid #28283a; border-radius: 6px;")
+        self.btn_browse_logo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_browse_logo.clicked.connect(self._browse_logo_file)
 
-        self.slider_scale = QSlider(Qt.Orientation.Horizontal)
-        self.slider_scale.setRange(1, 100)
-        self.slider_scale.setValue(20)
-        self.slider_scale.valueChanged.connect(self.on_scale_changed)
+        row_file.addWidget(self.input_logo_path, 1)
+        row_file.addWidget(self.btn_browse_logo)
+        layout.addLayout(row_file)
 
-        self.lbl_scale_val = QLabel("20%")
-        self.lbl_scale_val.setStyleSheet("color: #93c5fd; font-size: 11px; font-weight: bold; min-width: 28px;")
+        # Escala del Logo
+        row_scale = QHBoxLayout()
+        lbl_scale_title = QLabel("Escala")
+        lbl_scale_title.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.lbl_scale_val = QLabel("25%")
+        self.lbl_scale_val.setStyleSheet("color: #f8fafc; font-size: 12px; font-weight: 600;")
+        row_scale.addWidget(lbl_scale_title)
+        row_scale.addStretch()
+        row_scale.addWidget(self.lbl_scale_val)
+        layout.addLayout(row_scale)
 
-        scale_row.addWidget(lbl_sc)
-        scale_row.addWidget(self.slider_scale)
-        scale_row.addWidget(self.lbl_scale_val)
-        layout.addLayout(scale_row)
+        self.slider_logo_scale = QSlider(Qt.Orientation.Horizontal)
+        self.slider_logo_scale.setRange(1, 100)
+        self.slider_logo_scale.setValue(25)
+        self.slider_logo_scale.valueChanged.connect(self._on_logo_scale_changed)
+        layout.addWidget(self.slider_logo_scale)
 
         return widget
 
-    def on_scale_changed(self, value: int):
-        self.lbl_scale_val.setText(f"{value}%")
+    # -----------------------------------------------------------------
+    # MANEJADORES DE EVENTOS
+    # -----------------------------------------------------------------
+    def _on_tab_changed(self, index: int):
+        self._active_mode = "text" if index == 0 else "logo"
         self.emit_config()
 
-    def browse_logo_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Seleccionar Logo", "",
-            "Imágenes (*.png *.jpg *.jpeg *.webp *.bmp *.tif);;Todos los archivos (*.*)"
-        )
-        if file_path:
-            self.txt_logo_path.setText(file_path)
-            self.emit_config()
-
-    def set_preset(self, key: str):
-        self.preset_position = key
-        self.is_custom_position = False
-        readable_name = key.replace('_', ' ').title()
-        self.lbl_pos_status.setText(readable_name)
-        for k, btn in self.preset_buttons.items():
-            btn.setChecked(k == key)
+    def _on_opacity_changed(self, val: int):
+        self.lbl_opacity_val.setText(f"{val}%")
         self.emit_config()
 
-    def set_custom_drag_position(self, pos_x: float, pos_y: float):
-        self.preset_position = "custom"
-        self.is_custom_position = True
-        self.custom_pos_x = int(pos_x)
-        self.custom_pos_y = int(pos_y)
-        self.lbl_pos_status.setText(f"Libre ({self.custom_pos_x},{self.custom_pos_y})")
-        for btn in self.preset_buttons.values():
+    def _on_rotation_changed(self, val: int):
+        self.lbl_rot_val.setText(f"{val}°")
+        self.emit_config()
+
+    def _on_logo_scale_changed(self, val: int):
+        self.lbl_scale_val.setText(f"{val}%")
+        self.emit_config()
+
+    def _on_preset_clicked(self, preset_name: str):
+        self._active_preset = preset_name
+        self._custom_pos_x = None
+        self._custom_pos_y = None
+        self.lbl_pos_status.setText(self.PRESET_LABELS.get(preset_name, preset_name))
+        self.lbl_pos_status.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 600; border: none;")
+        self.emit_config()
+
+    def set_custom_drag_position(self, x: float, y: float):
+        """Llamado desde el lienzo interactivo cuando el usuario arrastra libremente la marca."""
+        self._active_preset = "custom"
+        self._custom_pos_x = int(x)
+        self._custom_pos_y = int(y)
+
+        # Desmarcar todos los botones de la matriz
+        for btn in self.grid_buttons.values():
             btn.setChecked(False)
 
-    def on_opacity_slider_changed(self, value: int):
-        self.lbl_opacity_val.setText(f"{value}%")
-        self.emit_config()
+        self.lbl_pos_status.setText(f"Libre ({self._custom_pos_x}, {self._custom_pos_y})")
+        self.lbl_pos_status.setStyleSheet("color: #60a5fa; font-size: 11px; font-weight: 600; border: none;")
 
-    def on_rotation_slider_changed(self, value: int):
-        self.lbl_rotation_val.setText(f"{value}°")
-        self.emit_config()
+    def _browse_logo_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar Logotipo o Imagen",
+            "",
+            "Imágenes (*.png *.jpg *.jpeg *.webp *.bmp *.tiff);;Todos los archivos (*.*)"
+        )
+        if file_path:
+            self.input_logo_path.setText(file_path)
+            self.emit_config()
 
-    def get_current_config(self) -> Dict[str, Any]:
-        mode = "text" if self.tabs.currentIndex() == 0 else "logo"
-        font_path = self.combo_font.currentData() or ""
-
+    # -----------------------------------------------------------------
+    # EXPORTACIÓN DE CONFIGURACIÓN
+    # -----------------------------------------------------------------
+    def get_current_config(self) -> dict:
+        """Devuelve el diccionario con el estado actual del panel sincronizado."""
         return {
-            "mode": mode,
-            "text": self.txt_watermark.text(),
-            "font_path": font_path,
-            "font_size": self.slider_font_size.value(),
-            "color": self.btn_text_color.current_color,
-            "is_bold": getattr(self, "btn_bold", None).isChecked() if hasattr(self, "btn_bold") else False,
-            "is_italic": getattr(self, "btn_italic", None).isChecked() if hasattr(self, "btn_italic") else False,
-            "is_underline": getattr(self, "btn_underline", None).isChecked() if hasattr(self, "btn_underline") else False,
-            "shadow": False,
-            "outline": False,
-            "logo_path": self.txt_logo_path.text(),
-            "scale": float(self.slider_scale.value()),
+            "mode": self._active_mode,
+            "text": self.input_text.text(),
+            "font_family": self.combo_font.currentText(),
+            "font_size": self.spin_font_size.value(),
+            "color": self.btn_color.color,
+            "is_bold": self.btn_bold.isChecked(),
+            "is_italic": self.btn_italic.isChecked(),
+            "is_underline": self.btn_underline.isChecked(),
+            "logo_path": self.input_logo_path.text(),
+            "scale": self.slider_logo_scale.value() / 100.0,
             "opacity": self.slider_opacity.value() / 100.0,
-            "rotation": float(self.slider_rotation.value()),
-            "preset": self.preset_position,
+            "rotation": float(self.slider_rot.value()),
+            "preset": self._active_preset,
             "margin_x": self.spin_margin_x.value(),
             "margin_y": self.spin_margin_y.value(),
-            "pos_x": self.custom_pos_x,
-            "pos_y": self.custom_pos_y,
-            "relative_pos": False
+            "pos_x": self._custom_pos_x,
+            "pos_y": self._custom_pos_y,
         }
 
     def emit_config(self):
+        """Emite la señal config_changed con la configuración actualizada."""
         self.config_changed.emit(self.get_current_config())
