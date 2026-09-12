@@ -1,3 +1,4 @@
+import os
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import math
 from typing import Tuple, Optional, Dict, Any
@@ -78,10 +79,29 @@ class WatermarkEngine:
         if not text.strip():
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
 
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-        except Exception:
-            font = ImageFont.load_default()
+        font = None
+        if font_path and os.path.exists(font_path):
+            try:
+                font = ImageFont.truetype(font_path, font_size)
+            except Exception:
+                font = None
+
+        if font is None:
+            # Intentar cargar fuentes estándar del sistema
+            for standard in ["arial.ttf", "segoeui.ttf", "calibri.ttf", "tahoma.ttf"]:
+                sys_font = os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), 'Fonts', standard)
+                if os.path.exists(sys_font):
+                    try:
+                        font = ImageFont.truetype(sys_font, font_size)
+                        break
+                    except Exception:
+                        pass
+
+        if font is None:
+            try:
+                font = ImageFont.load_default(size=font_size)
+            except Exception:
+                font = ImageFont.load_default()
 
         # Medir tamaño del texto
         dummy_img = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
@@ -207,7 +227,8 @@ class WatermarkEngine:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
 
         # Calcular nuevo tamaño según el porcentaje respecto a la imagen base
-        target_w = max(10, int(base_w * (scale_percent / 100.0)))
+        scale_factor = scale_percent if scale_percent <= 1.0 else (scale_percent / 100.0)
+        target_w = max(10, int(base_w * scale_factor))
         aspect_ratio = logo.height / logo.width
         target_h = max(10, int(target_w * aspect_ratio))
 

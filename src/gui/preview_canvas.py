@@ -72,53 +72,73 @@ class FloatingZoomBar(QFrame):
         self.setObjectName("floating_zoom_bar")
         self.setStyleSheet("""
             QFrame#floating_zoom_bar {
-                background-color: rgba(24, 24, 36, 0.88);
-                border: 1px solid #28283a;
-                border-radius: 6px;
+                background-color: rgba(20, 20, 32, 0.94);
+                border: 1px solid #33334d;
+                border-radius: 8px;
             }
-            QPushButton {
+            QFrame#floating_zoom_bar QPushButton {
+                background-color: #242438;
+                border: 1px solid #383852;
+                color: #f1f5f9;
+                font-weight: 600;
+                font-size: 12px;
+                padding: 4px 10px;
+                border-radius: 5px;
+                min-height: 22px;
+            }
+            QFrame#floating_zoom_bar QPushButton:hover {
+                background-color: #31314e;
+                border-color: #60a5fa;
+                color: #60a5fa;
+            }
+            QFrame#floating_zoom_bar QPushButton:pressed {
+                background-color: #2563eb;
+                color: #ffffff;
+            }
+            QFrame#floating_zoom_bar QLabel {
+                color: #94a3b8;
+                font-size: 12px;
+                font-weight: 600;
+                padding: 0 4px;
+                min-width: 42px;
                 background: transparent;
                 border: none;
-                color: #e2e8f0;
-                font-weight: 600;
-                font-size: 11px;
-                padding: 4px 8px;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #242436;
-                color: #60a5fa;
             }
         """)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(2)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(4)
 
-        self.btn_fit = QPushButton("⛶ Ajustar")
-        self.btn_fit.setToolTip("Ajustar imagen al lienzo (Ctrl+0)")
+        self.btn_fit = QPushButton("⤢ Ajustar")
+        self.btn_fit.setToolTip("Ajustar imagen o vídeo a la ventana (Ctrl+0)")
+        self.btn_fit.setMinimumWidth(80)
         self.btn_fit.clicked.connect(self.parent_canvas.fit_in_view)
 
         self.btn_1x = QPushButton("1:1")
-        self.btn_1x.setToolTip("Escala original 100%")
+        self.btn_1x.setToolTip("Escala original al 100% (Ctrl+1)")
+        self.btn_1x.setMinimumWidth(38)
         self.btn_1x.clicked.connect(self.parent_canvas.reset_zoom)
-
-        self.lbl_zoom = QLabel("100%")
-        self.lbl_zoom.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600; padding: 0 4px;")
-
-        self.btn_zoom_in = QPushButton("+")
-        self.btn_zoom_in.setToolTip("Aumentar zoom")
-        self.btn_zoom_in.clicked.connect(self.parent_canvas.zoom_in)
 
         self.btn_zoom_out = QPushButton("−")
         self.btn_zoom_out.setToolTip("Reducir zoom")
+        self.btn_zoom_out.setFixedWidth(28)
         self.btn_zoom_out.clicked.connect(self.parent_canvas.zoom_out)
+
+        self.lbl_zoom = QLabel("100%")
+        self.lbl_zoom.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.btn_zoom_in = QPushButton("+")
+        self.btn_zoom_in.setToolTip("Aumentar zoom")
+        self.btn_zoom_in.setFixedWidth(28)
+        self.btn_zoom_in.clicked.connect(self.parent_canvas.zoom_in)
 
         layout.addWidget(self.btn_fit)
         layout.addWidget(self.btn_1x)
         layout.addWidget(self.btn_zoom_out)
         layout.addWidget(self.lbl_zoom)
         layout.addWidget(self.btn_zoom_in)
+        self.adjustSize()
 
     def update_zoom_text(self, factor_percent: int):
         self.lbl_zoom.setText(f"{factor_percent}%")
@@ -132,6 +152,7 @@ class PreviewCanvas(QWidget):
     """
     position_changed = pyqtSignal(float, float)
     time_seeked = pyqtSignal(float)
+    trim_range_changed = pyqtSignal(float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -139,6 +160,8 @@ class PreviewCanvas(QWidget):
         self._media_duration = 0.0
         self._is_video = False
         self._is_playing = False
+        self._trim_start = 0.0
+        self._trim_end = 0.0
 
         # Timer para simulación fluida de reproducción de vídeo
         self._play_timer = QTimer(self)
@@ -197,28 +220,45 @@ class PreviewCanvas(QWidget):
         self.floating_zoom.raise_()
 
         # -------------------------------------------------------------
-        # 3. BARRA INFERIOR DE VÍDEO (Timeline & Transporte)
+        # 3. BARRA INFERIOR DE VÍDEO (Timeline & Transporte & Recorte IN/OUT)
         # -------------------------------------------------------------
         self.frame_video = QFrame()
-        self.frame_video.setFixedHeight(38)
+        self.frame_video.setFixedHeight(46)
         self.frame_video.setStyleSheet("""
-            background-color: #181824;
-            border-top: 1px solid #28283a;
-            padding: 2px 10px;
+            QFrame {
+                background-color: #141420;
+                border-top: 1px solid #28283a;
+                padding: 2px 8px;
+            }
+            QPushButton.trim_btn {
+                background-color: #202032;
+                color: #e2e8f0;
+                border: 1px solid #383852;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 3px 8px;
+                min-height: 22px;
+            }
+            QPushButton.trim_btn:hover {
+                background-color: #2d2d48;
+                border-color: #38bdf8;
+                color: #38bdf8;
+            }
         """)
         video_layout = QHBoxLayout(self.frame_video)
         video_layout.setContentsMargins(6, 4, 6, 4)
         video_layout.setSpacing(8)
 
         self.btn_play_pause = QPushButton("▶")
-        self.btn_play_pause.setFixedSize(36, 26)
+        self.btn_play_pause.setFixedSize(36, 28)
         self.btn_play_pause.setStyleSheet("""
             QPushButton {
                 background-color: #2563eb;
                 color: #ffffff;
                 border: none;
-                border-radius: 4px;
-                font-size: 11px;
+                border-radius: 5px;
+                font-size: 12px;
                 font-weight: 700;
             }
             QPushButton:hover {
@@ -230,14 +270,37 @@ class PreviewCanvas(QWidget):
         self.slider_video = QSlider(Qt.Orientation.Horizontal)
         self.slider_video.setRange(0, 1000)
         self.slider_video.setValue(0)
-        self.slider_video.sliderMoved.connect(self._on_seek_moved)
+        self.slider_video.valueChanged.connect(self._on_seek_moved)
 
         self.lbl_time = QLabel("00:00.00 / 00:00.00")
-        self.lbl_time.setStyleSheet("color: #93c5fd; font-family: 'Consolas', monospace; font-size: 11px; font-weight: 600;")
+        self.lbl_time.setStyleSheet("color: #93c5fd; font-family: 'Consolas', monospace; font-size: 11px; font-weight: 600; min-width: 125px;")
+
+        # Botones de recorte de vídeo (Punto IN y Punto OUT)
+        self.btn_set_in = QPushButton("⭢[ Inicio")
+        self.btn_set_in.setProperty("class", "trim_btn")
+        self.btn_set_in.setToolTip("Fijar el segundo actual como INICIO del vídeo con marca")
+        self.btn_set_in.clicked.connect(self._on_set_in_clicked)
+
+        self.btn_set_out = QPushButton("]⭠ Fin")
+        self.btn_set_out.setProperty("class", "trim_btn")
+        self.btn_set_out.setToolTip("Fijar el segundo actual como FIN del vídeo con marca")
+        self.btn_set_out.clicked.connect(self._on_set_out_clicked)
+
+        self.btn_reset_trim = QPushButton("↺ Todo")
+        self.btn_reset_trim.setProperty("class", "trim_btn")
+        self.btn_reset_trim.setToolTip("Restablecer al 100% del vídeo completo")
+        self.btn_reset_trim.clicked.connect(self._on_reset_trim_clicked)
+
+        self.lbl_trim_info = QLabel("✂ Recorte: Todo")
+        self.lbl_trim_info.setStyleSheet("color: #38bdf8; font-family: 'Consolas', monospace; font-size: 11px; font-weight: 600; padding: 0 4px;")
 
         video_layout.addWidget(self.btn_play_pause)
         video_layout.addWidget(self.slider_video, 1)
         video_layout.addWidget(self.lbl_time)
+        video_layout.addWidget(self.btn_set_in)
+        video_layout.addWidget(self.btn_set_out)
+        video_layout.addWidget(self.btn_reset_trim)
+        video_layout.addWidget(self.lbl_trim_info)
 
         main_layout.addWidget(self.frame_video)
         self.frame_video.hide()  # Oculto por defecto hasta cargar un vídeo
@@ -247,6 +310,7 @@ class PreviewCanvas(QWidget):
     # -----------------------------------------------------------------
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.floating_zoom.adjustSize()
         self.floating_zoom.move(14, 14)
 
     def _handle_wheel_zoom(self, event):
@@ -319,6 +383,11 @@ class PreviewCanvas(QWidget):
         """Establece la imagen de fondo base desde un PIL.Image."""
         self._is_video = is_video
         self._media_duration = duration
+        self._trim_start = 0.0
+        self._trim_end = duration
+        self._is_playing = False
+        self._play_timer.stop()
+        self.btn_play_pause.setText("▶")
 
         qimg = self.pil_to_qimage(pil_image)
         pixmap = QPixmap.fromImage(qimg)
@@ -327,12 +396,81 @@ class PreviewCanvas(QWidget):
 
         if is_video:
             self.frame_video.show()
+            self.slider_video.blockSignals(True)
+            self.slider_video.setValue(0)
+            self.slider_video.blockSignals(False)
             self.update_video_time_display(0.0)
+            self._update_trim_display()
         else:
             self.frame_video.hide()
-            self._play_timer.stop()
 
         self.fit_in_view()
+
+    def set_trim_range(self, start_sec: float, end_sec: float):
+        """Establece el rango de recorte externamente."""
+        if self._media_duration <= 0:
+            return
+        self._trim_start = max(0.0, min(start_sec, self._media_duration))
+        self._trim_end = max(self._trim_start, min(end_sec, self._media_duration))
+        self._update_trim_display()
+
+    def get_trim_range(self) -> tuple[float, float]:
+        """Devuelve (start_sec, end_sec)."""
+        return self._trim_start, self._trim_end
+
+    def _on_set_in_clicked(self):
+        """Fija la posición actual del slider como punto de Inicio (IN)."""
+        if self._media_duration <= 0:
+            return
+        current_sec = (self.slider_video.value() / 1000.0) * self._media_duration
+        if current_sec >= self._trim_end:
+            self._trim_end = self._media_duration
+        self._trim_start = current_sec
+        self._update_trim_display()
+        self.trim_range_changed.emit(self._trim_start, self._trim_end)
+
+    def _on_set_out_clicked(self):
+        """Fija la posición actual del slider como punto de Fin (OUT)."""
+        if self._media_duration <= 0:
+            return
+        current_sec = (self.slider_video.value() / 1000.0) * self._media_duration
+        if current_sec <= self._trim_start:
+            self._trim_start = 0.0
+        self._trim_end = current_sec
+        self._update_trim_display()
+        self.trim_range_changed.emit(self._trim_start, self._trim_end)
+
+    def _on_reset_trim_clicked(self):
+        """Restablece el recorte a la duración completa del vídeo."""
+        self._trim_start = 0.0
+        self._trim_end = self._media_duration
+        self._update_trim_display()
+        self.trim_range_changed.emit(self._trim_start, self._trim_end)
+
+    def _update_trim_display(self):
+        """Actualiza la etiqueta con el intervalo recortado actual."""
+        if self._media_duration <= 0:
+            self.lbl_trim_info.setText("✂ Recorte: Todo")
+            return
+
+        is_trimmed = (self._trim_start > 0.05) or (self._trim_end < self._media_duration - 0.05)
+        if not is_trimmed:
+            self.lbl_trim_info.setText("✂ Todo el vídeo")
+            self.lbl_trim_info.setStyleSheet("color: #94a3b8; font-family: 'Consolas', monospace; font-size: 11px; font-weight: 600;")
+        else:
+            in_m, in_s = divmod(int(self._trim_start), 60)
+            in_ms = int((self._trim_start - int(self._trim_start)) * 100)
+            out_m, out_s = divmod(int(self._trim_end), 60)
+            out_ms = int((self._trim_end - int(self._trim_end)) * 100)
+            dur = self._trim_end - self._trim_start
+            self.lbl_trim_info.setText(f"✂ [{in_m:02d}:{in_s:02d}.{in_ms:02d} ➔ {out_m:02d}:{out_s:02d}.{out_ms:02d}] ({dur:.1f}s)")
+            self.lbl_trim_info.setStyleSheet("color: #38bdf8; font-family: 'Consolas', monospace; font-size: 11px; font-weight: 700;")
+
+    def update_base_frame(self, pil_image: Image.Image):
+        """Actualiza el fotograma de vídeo actual en tiempo real sin reiniciar zoom ni vista."""
+        qimg = self.pil_to_qimage(pil_image)
+        pixmap = QPixmap.fromImage(qimg)
+        self.base_pixmap_item.setPixmap(pixmap)
 
     def set_watermark_pixmap(self, pil_image: Image.Image, x: float = None, y: float = None):
         """Actualiza el gráfico y opcionalmente la posición de la marca."""
@@ -355,22 +493,34 @@ class PreviewCanvas(QWidget):
     # CONTROL DE LÍNEA DE TIEMPO DE VÍDEO
     # -----------------------------------------------------------------
     def toggle_play_pause(self):
+        if not self._is_video or self._media_duration <= 0:
+            return
+
         if self._is_playing:
             self._play_timer.stop()
             self.btn_play_pause.setText("▶")
             self._is_playing = False
         else:
+            if self.slider_video.value() >= 1000:
+                self.slider_video.setValue(0)
             self._play_timer.start()
             self.btn_play_pause.setText("⏸")
             self._is_playing = True
 
     def _on_play_tick(self):
+        if not self._is_video or self._media_duration <= 0:
+            self._play_timer.stop()
+            return
+
         current_val = self.slider_video.value()
-        if current_val >= 1000:
-            self.slider_video.setValue(0)
+        # Avanzar en función de la duración real (tick cada 100ms = 0.1s)
+        step = int(max(1, (0.1 / self._media_duration) * 1000))
+        next_val = current_val + step
+        if next_val >= 1000:
+            self.slider_video.setValue(1000)
+            self.toggle_play_pause()
         else:
-            self.slider_video.setValue(current_val + 5)
-        self._on_seek_moved(self.slider_video.value())
+            self.slider_video.setValue(next_val)
 
     def _on_seek_moved(self, value: int):
         current_sec = (value / 1000.0) * self._media_duration

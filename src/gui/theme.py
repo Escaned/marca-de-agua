@@ -106,11 +106,20 @@ QMenu::separator {{
 }}
 
 /* ==========================================================================
-   Paneles, Tarjetas (GroupBox) y Splitters
+   Paneles, Tarjetas (GroupBox), ScrollAreas y Splitters
    ========================================================================== */
-QFrame#control_panel {{
+QWidget#control_panel, QFrame#control_panel {{
     background-color: {COLORS["bg_panel"]};
     border-left: 1px solid {COLORS["border_subtle"]};
+}}
+
+QScrollArea {{
+    background-color: {COLORS["bg_panel"]};
+    border: none;
+}}
+
+QScrollArea > QWidget > QWidget {{
+    background-color: {COLORS["bg_panel"]};
 }}
 
 QSplitter::handle {{

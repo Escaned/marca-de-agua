@@ -6,9 +6,9 @@ Implementación completa para PyQt6 compatible con WatermarkEngine y MainWindow.
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QPushButton, QLineEdit, QComboBox, QSlider, QSpinBox,
+    QPushButton, QLineEdit, QComboBox, QSlider, QSpinBox, QDoubleSpinBox,
     QColorDialog, QFileDialog, QTabWidget, QFrame, QButtonGroup,
-    QSizePolicy
+    QSizePolicy, QScrollArea
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontDatabase
@@ -21,8 +21,9 @@ class ColorButton(QPushButton):
     def __init__(self, default_color=(248, 250, 252), parent=None):
         super().__init__(parent)
         self._color = default_color
-        self.setFixedHeight(28)
+        self.setFixedHeight(30)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Hacer clic para cambiar el color de la marca de agua")
         self.clicked.connect(self._choose_color)
         self._update_appearance()
 
@@ -39,18 +40,17 @@ class ColorButton(QPushButton):
     def _update_appearance(self):
         r, g, b = self._color
         hex_color = f"#{r:02X}{g:02X}{b:02X}"
-        # Contraste de texto calculado según luminancia estándar
         luminance = 0.299 * r + 0.587 * g + 0.114 * b
         text_color = "#0f172a" if luminance > 140 else "#f8fafc"
         self.setStyleSheet(f"""
             QPushButton {{
                 background-color: {hex_color};
                 color: {text_color};
-                border: 1px solid #28283a;
+                border: 1px solid #383852;
                 border-radius: 6px;
-                font-weight: 600;
+                font-weight: 700;
                 font-size: 11px;
-                padding: 4px 10px;
+                padding: 4px 8px;
             }}
             QPushButton:hover {{
                 border-color: #60a5fa;
@@ -76,6 +76,7 @@ class ControlPanel(QWidget):
     config_changed = pyqtSignal(dict)
     open_image_requested = pyqtSignal()
     save_image_requested = pyqtSignal()
+    trim_range_changed = pyqtSignal(float, float)
 
     PRESET_NAMES = {
         (0, 0): "top_left",
@@ -105,20 +106,64 @@ class ControlPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("control_panel")
-        self.setFixedWidth(280)
+        self.setFixedWidth(350)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         self._active_mode = "text"  # 'text' o 'logo'
         self._custom_pos_x = None
         self._custom_pos_y = None
         self._active_preset = "bottom_right"
+        self._is_video = False
+        self._video_duration = 0.0
+        self._trim_start = 0.0
+        self._trim_end = 0.0
 
         self._build_ui()
 
     def _build_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # ScrollArea ergonómico que evita que los controles queden cortados
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background-color: #12121c;
+                width: 6px;
+                margin: 0px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #28283e;
+                min-height: 24px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #38bdf8;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+
+        content_widget = QWidget()
+        content_widget.setObjectName("panel_content_widget")
+        content_widget.setStyleSheet("""
+            QWidget#panel_content_widget {
+                background-color: #181824;
+            }
+        """)
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        content_layout.setSpacing(10)
 
         # -------------------------------------------------------------
         # 1. BOTONES SUPERIORES DE ACCIÓN PRINCIPAL (Cargar / Guardar)
@@ -138,7 +183,7 @@ class ControlPanel(QWidget):
 
         top_actions_layout.addWidget(self.btn_load)
         top_actions_layout.addWidget(self.btn_save)
-        main_layout.addLayout(top_actions_layout)
+        content_layout.addLayout(top_actions_layout)
 
         # -------------------------------------------------------------
         # 2. PESTAÑAS MODO MARCA: TEXTO O LOGO
@@ -150,7 +195,7 @@ class ControlPanel(QWidget):
         self.tabs.addTab(self.tab_text, "✍️ Texto")
         self.tabs.addTab(self.tab_logo, "🖼️ Logo")
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        main_layout.addWidget(self.tabs)
+        content_layout.addWidget(self.tabs)
 
         # -------------------------------------------------------------
         # 3. SECCIÓN: ESTILO & TRANSFORMACIÓN (Opacidad, Rotación)
@@ -205,7 +250,7 @@ class ControlPanel(QWidget):
         self.slider_rot.valueChanged.connect(self._on_rotation_changed)
         style_layout.addWidget(self.slider_rot)
 
-        main_layout.addWidget(frame_style)
+        content_layout.addWidget(frame_style)
 
         # -------------------------------------------------------------
         # 4. SECCIÓN: POSICIÓN & ANCLAJE ESPACIAL (Matriz 3x3 + Márgenes)
@@ -291,10 +336,67 @@ class ControlPanel(QWidget):
         row_margins.addLayout(col_my)
         pos_layout.addLayout(row_margins)
 
-        main_layout.addWidget(frame_pos)
+        content_layout.addWidget(frame_pos)
+
+        # -------------------------------------------------------------
+        # 5. SECCIÓN: RECORTE DE VÍDEO (PUNTO IN / OUT)
+        # -------------------------------------------------------------
+        self.frame_trim = QFrame()
+        self.frame_trim.setStyleSheet("background-color: #181824; border: 1px solid #28283a; border-radius: 8px; padding: 6px;")
+        trim_layout = QVBoxLayout(self.frame_trim)
+        trim_layout.setContentsMargins(8, 8, 8, 8)
+        trim_layout.setSpacing(6)
+
+        lbl_trim_title = QLabel("✂ RECORTE DE VÍDEO (IN / OUT)")
+        lbl_trim_title.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; border: none;")
+        trim_layout.addWidget(lbl_trim_title)
+
+        # Fila Inicio y Fin
+        row_in_out = QHBoxLayout()
+        row_in_out.setSpacing(6)
+
+        # Punto Inicio
+        col_in = QVBoxLayout()
+        lbl_in = QLabel("Inicio (seg)")
+        lbl_in.setStyleSheet("color: #94a3b8; font-size: 11px; border: none;")
+        self.spin_start_time = QDoubleSpinBox()
+        self.spin_start_time.setRange(0.0, 99999.0)
+        self.spin_start_time.setSingleStep(0.5)
+        self.spin_start_time.setDecimals(2)
+        self.spin_start_time.setSuffix(" s")
+        self.spin_start_time.valueChanged.connect(self._on_trim_spin_changed)
+        col_in.addWidget(lbl_in)
+        col_in.addWidget(self.spin_start_time)
+
+        # Punto Fin
+        col_out = QVBoxLayout()
+        lbl_out = QLabel("Fin (seg)")
+        lbl_out.setStyleSheet("color: #94a3b8; font-size: 11px; border: none;")
+        self.spin_end_time = QDoubleSpinBox()
+        self.spin_end_time.setRange(0.0, 99999.0)
+        self.spin_end_time.setSingleStep(0.5)
+        self.spin_end_time.setDecimals(2)
+        self.spin_end_time.setSuffix(" s")
+        self.spin_end_time.valueChanged.connect(self._on_trim_spin_changed)
+        col_out.addWidget(lbl_out)
+        col_out.addWidget(self.spin_end_time)
+
+        row_in_out.addLayout(col_in)
+        row_in_out.addLayout(col_out)
+        trim_layout.addLayout(row_in_out)
+
+        self.lbl_trim_summary = QLabel("Corte: 0.00s a 0.00s (0.0s)")
+        self.lbl_trim_summary.setStyleSheet("color: #94a3b8; font-size: 11px; border: none; font-family: 'Consolas', monospace;")
+        trim_layout.addWidget(self.lbl_trim_summary)
+
+        content_layout.addWidget(self.frame_trim)
+        self.frame_trim.hide()  # Oculto hasta que se cargue un vídeo
 
         # Espaciador elástico inferior
-        main_layout.addStretch()
+        content_layout.addStretch()
+
+        self.scroll_area.setWidget(content_widget)
+        root_layout.addWidget(self.scroll_area)
 
     # -----------------------------------------------------------------
     # SUB-PESTAÑA 1: CONTROLES DE TEXTO
@@ -326,7 +428,6 @@ class ControlPanel(QWidget):
         self.combo_font.setEditable(False)
         fonts = QFontDatabase.families()
         common_fonts = ["Inter", "Segoe UI", "Arial", "Roboto", "Calibri", "Montserrat", "Helvetica"]
-        # Filtrar o anteponer preferidas
         for cf in reversed(common_fonts):
             if cf in fonts:
                 fonts.remove(cf)
@@ -350,25 +451,31 @@ class ControlPanel(QWidget):
         layout.addWidget(lbl_format)
 
         row_style_buttons = QHBoxLayout()
-        row_style_buttons.setSpacing(4)
+        row_style_buttons.setSpacing(6)
 
         self.btn_bold = QPushButton("B")
         self.btn_bold.setCheckable(True)
         self.btn_bold.setChecked(True)
         self.btn_bold.setProperty("class", "tool_btn")
-        self.btn_bold.setFixedSize(32, 28)
+        self.btn_bold.setFixedSize(36, 32)
+        self.btn_bold.setToolTip("Negrita (Bold)")
+        self.btn_bold.setStyleSheet("font-weight: 700; font-size: 13px;")
         self.btn_bold.clicked.connect(self.emit_config)
 
         self.btn_italic = QPushButton("I")
         self.btn_italic.setCheckable(True)
         self.btn_italic.setProperty("class", "tool_btn")
-        self.btn_italic.setFixedSize(32, 28)
+        self.btn_italic.setFixedSize(36, 32)
+        self.btn_italic.setToolTip("Cursiva (Italic)")
+        self.btn_italic.setStyleSheet("font-style: italic; font-size: 13px;")
         self.btn_italic.clicked.connect(self.emit_config)
 
         self.btn_underline = QPushButton("U")
         self.btn_underline.setCheckable(True)
         self.btn_underline.setProperty("class", "tool_btn")
-        self.btn_underline.setFixedSize(32, 28)
+        self.btn_underline.setFixedSize(36, 32)
+        self.btn_underline.setToolTip("Subrayado (Underline)")
+        self.btn_underline.setStyleSheet("text-decoration: underline; font-size: 13px;")
         self.btn_underline.clicked.connect(self.emit_config)
 
         self.btn_color = ColorButton(default_color=(248, 250, 252))
@@ -482,6 +589,66 @@ class ControlPanel(QWidget):
             self.input_logo_path.setText(file_path)
             self.emit_config()
 
+    def set_video_mode(self, is_video: bool, duration: float = 0.0):
+        """Habilita o deshabilita la sección de recorte de vídeo según el tipo de medio."""
+        self._is_video = is_video
+        self._video_duration = duration
+        if is_video and duration > 0:
+            self.spin_start_time.blockSignals(True)
+            self.spin_end_time.blockSignals(True)
+            self.spin_start_time.setRange(0.0, duration)
+            self.spin_end_time.setRange(0.0, duration)
+            self.spin_start_time.setValue(0.0)
+            self.spin_end_time.setValue(duration)
+            self.spin_start_time.blockSignals(False)
+            self.spin_end_time.blockSignals(False)
+            self._trim_start = 0.0
+            self._trim_end = duration
+            self._update_trim_summary_label()
+            self.frame_trim.show()
+        else:
+            self.frame_trim.hide()
+
+    def set_trim_range(self, start_sec: float, end_sec: float):
+        """Sincroniza los valores numéricos desde el lienzo de previsualización."""
+        self._trim_start = max(0.0, min(start_sec, self._video_duration))
+        self._trim_end = max(self._trim_start, min(end_sec, self._video_duration))
+
+        self.spin_start_time.blockSignals(True)
+        self.spin_end_time.blockSignals(True)
+        self.spin_start_time.setValue(self._trim_start)
+        self.spin_end_time.setValue(self._trim_end)
+        self.spin_start_time.blockSignals(False)
+        self.spin_end_time.blockSignals(False)
+        self._update_trim_summary_label()
+
+    def _on_trim_spin_changed(self):
+        """Manejador cuando el usuario modifica los spinboxes de tiempo."""
+        st = self.spin_start_time.value()
+        et = self.spin_end_time.value()
+        if st > et:
+            et = st
+            self.spin_end_time.blockSignals(True)
+            self.spin_end_time.setValue(et)
+            self.spin_end_time.blockSignals(False)
+
+        self._trim_start = st
+        self._trim_end = et
+        self._update_trim_summary_label()
+        self.trim_range_changed.emit(self._trim_start, self._trim_end)
+        self.emit_config()
+
+    def _update_trim_summary_label(self):
+        """Actualiza el texto descriptivo del fragmento."""
+        dur = max(0.0, self._trim_end - self._trim_start)
+        is_trimmed = (self._trim_start > 0.05) or (self._trim_end < self._video_duration - 0.05)
+        if is_trimmed:
+            self.lbl_trim_summary.setText(f"Corte: {self._trim_start:.2f}s ➔ {self._trim_end:.2f}s ({dur:.1f}s)")
+            self.lbl_trim_summary.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 600; border: none; font-family: 'Consolas', monospace;")
+        else:
+            self.lbl_trim_summary.setText(f"Vídeo Completo ({self._video_duration:.1f}s)")
+            self.lbl_trim_summary.setStyleSheet("color: #94a3b8; font-size: 11px; border: none; font-family: 'Consolas', monospace;")
+
     # -----------------------------------------------------------------
     # EXPORTACIÓN DE CONFIGURACIÓN
     # -----------------------------------------------------------------
@@ -505,6 +672,9 @@ class ControlPanel(QWidget):
             "margin_y": self.spin_margin_y.value(),
             "pos_x": self._custom_pos_x,
             "pos_y": self._custom_pos_y,
+            "start_time": self._trim_start if self._is_video else 0.0,
+            "end_time": self._trim_end if self._is_video else 0.0,
+            "is_trimmed": ((self._trim_start > 0.05) or (self._trim_end < self._video_duration - 0.05)) if self._is_video else False,
         }
 
     def emit_config(self):

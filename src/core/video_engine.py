@@ -119,6 +119,18 @@ class VideoEngine:
                 base_w, base_h, elem_w, elem_h, preset, margin_x, margin_y
             )
 
+        # Extraer rango de recorte si se especifica
+        start_time = float(config.get("start_time", 0.0) or 0.0)
+        end_time = float(config.get("end_time", duration) or duration)
+
+        start_time = max(0.0, min(start_time, duration))
+        end_time = max(start_time, min(end_time, duration))
+        if end_time <= start_time:
+            end_time = duration
+
+        clip_duration = max(0.1, end_time - start_time)
+        is_trimmed = (start_time > 0.05) or (end_time < duration - 0.05)
+
         # 2. Guardar la marca de agua temporalmente como PNG transparente
         temp_wm_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         temp_wm_path = temp_wm_file.name
@@ -137,21 +149,25 @@ class VideoEngine:
             # Filtro overlay para superponer la marca de agua
             overlay_filter = f"[0:v][1:v]overlay=x={pos_x}:y={pos_y}[outv]"
 
-            cmd = [
-                ffmpeg_exe,
-                "-y",                       # Sobrescribir archivo de salida
+            cmd = [ffmpeg_exe, "-y"]
+
+            if is_trimmed:
+                # Corte rápido y preciso con recodificación
+                cmd.extend(["-ss", f"{start_time:.3f}", "-to", f"{end_time:.3f}"])
+
+            cmd.extend([
                 "-i", input_video,          # Entrada 0: Vídeo original
                 "-i", temp_wm_path,         # Entrada 1: Marca de agua PNG
                 "-filter_complex", overlay_filter,
                 "-map", "[outv]",           # Usar vídeo con overlay
                 "-map", "0:a?",             # Copiar audio si existe, o ignorar si no hay
-                "-c:a", "copy",             # Copia directa de audio sin pérdida ni recodificación
+                "-c:a", "aac" if is_trimmed else "copy", # aac para evitar desincronización en cortes
                 "-c:v", "libx264",          # Códec de vídeo H.264
                 "-pix_fmt", "yuv420p",      # Máxima compatibilidad de reproducción
                 "-crf", "18",               # Calidad visual prácticamente sin pérdida (CRF 18)
                 "-preset", "fast",          # Velocidad de codificación óptima
                 output_video
-            ]
+            ])
 
             # Iniciar proceso con lectura de stderr para la barra de progreso
             # Ocultar ventana de consola en Windows con CREATE_NO_WINDOW
@@ -171,6 +187,7 @@ class VideoEngine:
 
             # Patrón para extraer el tiempo actual procesado (time=00:01:23.45)
             time_pattern = re.compile(r"time=(\d+):(\d+):(\d+\.?\d*)")
+            target_duration = clip_duration if is_trimmed else duration
 
             while True:
                 if cancel_check and cancel_check():
@@ -182,14 +199,14 @@ class VideoEngine:
                 if not line and proc.poll() is not None:
                     break
 
-                if line and duration > 0:
+                if line and target_duration > 0:
                     match = time_pattern.search(line)
                     if match:
                         hours = float(match.group(1))
                         minutes = float(match.group(2))
                         seconds = float(match.group(3))
                         current_sec = hours * 3600 + minutes * 60 + seconds
-                        progress = min(1.0, current_sec / duration)
+                        progress = min(1.0, current_sec / target_duration)
                         if progress_callback:
                             progress_callback(progress)
 
